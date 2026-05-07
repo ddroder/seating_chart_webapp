@@ -23,6 +23,13 @@ Install dependencies:
 npm install
 ```
 
+If this app was previously installed with floating `latest` versions, clear the old Vite 8/Rolldown install first:
+
+```sh
+rm -rf node_modules
+npm install
+```
+
 Run the dev server:
 
 ```sh
