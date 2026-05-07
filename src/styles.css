@@ -842,6 +842,14 @@ button:disabled {
   box-shadow: 0 10px 30px rgba(58, 42, 28, 0.12);
 }
 
+.floor-object.collapsed {
+  align-content: center;
+  justify-items: center;
+  min-width: 7rem;
+  min-height: 4rem;
+  padding: 0.8rem 3.7rem 0.8rem;
+}
+
 .floor-object.dance-floor {
   background: rgba(201, 147, 61, 0.18);
 }
@@ -862,6 +870,10 @@ button:disabled {
   gap: 0.35rem;
 }
 
+.floor-object-header {
+  flex-wrap: wrap;
+}
+
 .floor-object-header select,
 .floor-label-input,
 .floor-size-row input {
@@ -880,6 +892,57 @@ button:disabled {
 
 .floor-size-row input {
   width: 50%;
+}
+
+.floor-object-label {
+  display: grid;
+  gap: 0.15rem;
+  max-width: 100%;
+  text-align: center;
+}
+
+.floor-object-label strong,
+.floor-object-label span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.floor-object-label span {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 900;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.compact-label {
+  pointer-events: none;
+}
+
+.floor-resize-handle {
+  position: absolute;
+  right: -0.2rem;
+  bottom: -0.2rem;
+  width: 1.15rem;
+  height: 1.15rem;
+  border: 2px solid rgba(62, 109, 79, 0.74);
+  border-radius: 0.35rem;
+  background: #fffaf2;
+  box-shadow: 0 5px 12px rgba(58, 42, 28, 0.16);
+  cursor: nwse-resize;
+  touch-action: none;
+}
+
+.floor-resize-handle::after {
+  content: "";
+  position: absolute;
+  right: 0.16rem;
+  bottom: 0.16rem;
+  width: 0.42rem;
+  height: 0.42rem;
+  border-right: 2px solid rgba(62, 109, 79, 0.8);
+  border-bottom: 2px solid rgba(62, 109, 79, 0.8);
 }
 
 .table-card.round {

@@ -54,6 +54,14 @@ interface PanState {
   startScrollTop: number;
 }
 
+interface ResizeState {
+  objectId: string;
+  startPointerX: number;
+  startPointerY: number;
+  startWidth: number;
+  startHeight: number;
+}
+
 interface PrintOptions {
   includeIgnored: boolean;
   includeUnseated: boolean;
@@ -98,14 +106,22 @@ export default function App() {
   const [canvasZoom, setCanvasZoom] = useState(0.85);
   const [dragState, setDragState] = useState<DragState | null>(null);
   const [panState, setPanState] = useState<PanState | null>(null);
+  const [resizeState, setResizeState] = useState<ResizeState | null>(null);
   const [collapsedTableIds, setCollapsedTableIds] = useState<Set<string>>(new Set());
+  const [collapsedFloorObjectIds, setCollapsedFloorObjectIds] = useState<Set<string>>(new Set());
   const [localPositions, setLocalPositions] = useState<Record<string, { x: number; y: number }>>({});
+  const [localFloorObjectSizes, setLocalFloorObjectSizes] = useState<Record<string, { width: number; height: number }>>({});
   const localPositionsRef = useRef(localPositions);
+  const localFloorObjectSizesRef = useRef(localFloorObjectSizes);
   const canvasViewportRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     localPositionsRef.current = localPositions;
   }, [localPositions]);
+
+  useEffect(() => {
+    localFloorObjectSizesRef.current = localFloorObjectSizes;
+  }, [localFloorObjectSizes]);
 
   useEffect(() => {
     const nextSocket: SeatingSocket = io();
@@ -209,6 +225,44 @@ export default function App() {
       window.removeEventListener("pointerup", handlePointerUp);
     };
   }, [panState]);
+
+  useEffect(() => {
+    if (!resizeState || !socket) {
+      return;
+    }
+
+    const activeResize = resizeState;
+    const activeSocket = socket;
+    const activeZoom = canvasZoom;
+
+    function handlePointerMove(event: globalThis.PointerEvent) {
+      const width = Math.max(24, activeResize.startWidth + (event.clientX - activeResize.startPointerX) / activeZoom);
+      const height = Math.max(24, activeResize.startHeight + (event.clientY - activeResize.startPointerY) / activeZoom);
+      setLocalFloorObjectSizes((current) => ({ ...current, [activeResize.objectId]: { width, height } }));
+    }
+
+    function handlePointerUp() {
+      const size = localFloorObjectSizesRef.current[activeResize.objectId] ?? {
+        width: activeResize.startWidth,
+        height: activeResize.startHeight,
+      };
+      activeSocket.emit("floor:update", { objectId: activeResize.objectId, width: size.width, height: size.height }, handleAck);
+      setLocalFloorObjectSizes((current) => {
+        const next = { ...current };
+        delete next[activeResize.objectId];
+        return next;
+      });
+      setResizeState(null);
+    }
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp, { once: true });
+
+    return () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+    };
+  }, [canvasZoom, resizeState, socket]);
 
   useEffect(() => {
     if (!snapshot) {
@@ -440,6 +494,22 @@ export default function App() {
     });
   }
 
+  function startFloorObjectResize(object: FloorPlanObject, event: PointerEvent<HTMLButtonElement>) {
+    if (event.button !== 0) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    setResizeState({
+      objectId: object.id,
+      startPointerX: event.clientX,
+      startPointerY: event.clientY,
+      startWidth: localFloorObjectSizes[object.id]?.width ?? object.width,
+      startHeight: localFloorObjectSizes[object.id]?.height ?? object.height,
+    });
+  }
+
   function toggleGuestSelection(guestId: string) {
     setSelectedGuestIds((current) => {
       const next = new Set(current);
@@ -551,6 +621,18 @@ export default function App() {
         next.delete(tableId);
       } else {
         next.add(tableId);
+      }
+      return next;
+    });
+  }
+
+  function toggleFloorObjectCollapsed(objectId: string) {
+    setCollapsedFloorObjectIds((current) => {
+      const next = new Set(current);
+      if (next.has(objectId)) {
+        next.delete(objectId);
+      } else {
+        next.add(objectId);
       }
       return next;
     });
@@ -841,8 +923,12 @@ export default function App() {
                     key={object.id}
                     object={object}
                     position={localPositions[object.id] ?? { x: object.x, y: object.y }}
+                    size={localFloorObjectSizes[object.id] ?? { width: object.width, height: object.height }}
                     chartLocked={snapshot.chart.locked}
+                    collapsed={collapsedFloorObjectIds.has(object.id)}
+                    onToggleCollapsed={toggleFloorObjectCollapsed}
                     onStartDrag={startFloorObjectDrag}
+                    onStartResize={startFloorObjectResize}
                     onUpdate={updateFloorPlanObject}
                     onDelete={deleteFloorPlanObject}
                   />
@@ -1375,8 +1461,12 @@ function TableCard(props: TableCardProps) {
 interface FloorObjectCardProps {
   object: FloorPlanObject;
   position: { x: number; y: number };
+  size: { width: number; height: number };
   chartLocked: boolean;
+  collapsed: boolean;
+  onToggleCollapsed: (objectId: string) => void;
   onStartDrag: (object: FloorPlanObject, event: PointerEvent<HTMLButtonElement>) => void;
+  onStartResize: (object: FloorPlanObject, event: PointerEvent<HTMLButtonElement>) => void;
   onUpdate: (input: UpdateFloorPlanObjectInput) => void;
   onDelete: (input: DeleteFloorPlanObjectInput) => void;
 }
@@ -1415,34 +1505,70 @@ function FloorObjectCard(props: FloorObjectCardProps) {
 
   return (
     <article
-      className={`floor-object ${props.object.kind}`}
-      style={{ left: props.position.x, top: props.position.y, width: props.object.width, height: props.object.height }}
+      className={`floor-object ${props.object.kind} ${props.collapsed ? "collapsed" : ""}`}
+      style={{ left: props.position.x, top: props.position.y, width: props.size.width, height: props.size.height }}
     >
-      <div className="floor-object-header">
-        <button type="button" className="drag-handle" disabled={props.chartLocked} onPointerDown={(event) => props.onStartDrag(props.object, event)}>
-          Drag
-        </button>
-        <select
-          value={props.object.kind}
-          disabled={props.chartLocked}
-          onChange={(event) => props.onUpdate({ objectId: props.object.id, kind: event.target.value as FloorPlanObjectKind })}
-        >
-          {FLOOR_OBJECT_KINDS.map((kind) => <option key={kind} value={kind}>{formatFloorObjectKind(kind)}</option>)}
-        </select>
-        <button type="button" className="danger-button" disabled={props.chartLocked} onClick={() => props.onDelete({ objectId: props.object.id })}>Delete</button>
-      </div>
-      <input
-        className="floor-label-input"
-        value={labelDraft}
+      {props.collapsed ? (
+        <>
+          <button
+            type="button"
+            className="drag-handle compact"
+            disabled={props.chartLocked}
+            onPointerDown={(event) => props.onStartDrag(props.object, event)}
+            aria-label={`Move ${props.object.label}`}
+          >
+            Move
+          </button>
+          <button
+            type="button"
+            className="table-edit-toggle compact"
+            onClick={() => props.onToggleCollapsed(props.object.id)}
+            aria-label={`Expand editing controls for ${props.object.label}`}
+          >
+            Edit
+          </button>
+          <div className="floor-object-label compact-label">
+            <strong>{props.object.label}</strong>
+            <span>{formatFloorObjectKind(props.object.kind)}</span>
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="floor-object-header">
+            <button type="button" className="drag-handle" disabled={props.chartLocked} onPointerDown={(event) => props.onStartDrag(props.object, event)}>
+              Drag
+            </button>
+            <select
+              value={props.object.kind}
+              disabled={props.chartLocked}
+              onChange={(event) => props.onUpdate({ objectId: props.object.id, kind: event.target.value as FloorPlanObjectKind })}
+            >
+              {FLOOR_OBJECT_KINDS.map((kind) => <option key={kind} value={kind}>{formatFloorObjectKind(kind)}</option>)}
+            </select>
+            <button type="button" className="danger-button" disabled={props.chartLocked} onClick={() => props.onDelete({ objectId: props.object.id })}>Delete</button>
+            <button type="button" className="table-edit-toggle" onClick={() => props.onToggleCollapsed(props.object.id)}>Collapse</button>
+          </div>
+          <input
+            className="floor-label-input"
+            value={labelDraft}
+            disabled={props.chartLocked}
+            onChange={(event) => setLabelDraft(event.target.value)}
+            onBlur={commitLabel}
+            aria-label="floor plan object label"
+          />
+          <div className="floor-size-row">
+            <input value={widthDraft} disabled={props.chartLocked} onChange={(event) => setWidthDraft(event.target.value)} onBlur={commitSize} aria-label="floor object width" />
+            <input value={heightDraft} disabled={props.chartLocked} onChange={(event) => setHeightDraft(event.target.value)} onBlur={commitSize} aria-label="floor object height" />
+          </div>
+        </>
+      )}
+      <button
+        type="button"
+        className="floor-resize-handle"
         disabled={props.chartLocked}
-        onChange={(event) => setLabelDraft(event.target.value)}
-        onBlur={commitLabel}
-        aria-label="floor plan object label"
+        onPointerDown={(event) => props.onStartResize(props.object, event)}
+        aria-label={`Resize ${props.object.label}`}
       />
-      <div className="floor-size-row">
-        <input value={widthDraft} disabled={props.chartLocked} onChange={(event) => setWidthDraft(event.target.value)} onBlur={commitSize} aria-label="floor object width" />
-        <input value={heightDraft} disabled={props.chartLocked} onChange={(event) => setHeightDraft(event.target.value)} onBlur={commitSize} aria-label="floor object height" />
-      </div>
     </article>
   );
 }
