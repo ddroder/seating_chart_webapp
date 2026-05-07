@@ -2,20 +2,27 @@ import { randomUUID } from "node:crypto";
 
 import type {
   AssignSeatInput,
+  BulkUpdateGuestsInput,
   ChartState,
   ClearSeatInput,
   CreateTableInput,
   DeleteTableInput,
+  GuestMetadata,
   SeatAssignment,
+  SeatPartyAtTableInput,
   SeatingTable,
   SetGuestIgnoredInput,
   TableShape,
+  UpdateGuestMetadataInput,
   UpdateTableInput,
 } from "../shared/types";
 
 const MIN_SEATS = 1;
 const MAX_SEATS = 32;
 const MAX_TABLE_NAME_LENGTH = 48;
+const MAX_TAGS_PER_GUEST = 12;
+const MAX_TAG_LENGTH = 32;
+const MAX_NOTE_LENGTH = 500;
 
 export class StateMutationError extends Error {
   constructor(message: string) {
@@ -26,9 +33,10 @@ export class StateMutationError extends Error {
 
 export function createEmptyChart(): ChartState {
   return {
-    version: 1,
+    version: 2,
     tables: [],
     ignoredGuestIds: [],
+    guestMetadata: {},
     updatedAt: new Date().toISOString(),
   };
 }
@@ -40,6 +48,7 @@ export function normalizeChartState(value: unknown, validGuestIds: Set<string>):
 
   const usedGuestIds = new Set<string>();
   const ignoredGuestIds = normalizeIgnoredGuestIds(value.ignoredGuestIds, validGuestIds);
+  const guestMetadata = normalizeGuestMetadata(value.guestMetadata, validGuestIds);
   const tables: SeatingTable[] = [];
 
   value.tables.forEach((rawTable, tableIndex) => {
@@ -83,9 +92,10 @@ export function normalizeChartState(value: unknown, validGuestIds: Set<string>):
   });
 
   return {
-    version: 1,
+    version: 2,
     tables,
     ignoredGuestIds: [...ignoredGuestIds].sort(),
+    guestMetadata,
     updatedAt: typeof value.updatedAt === "string" ? value.updatedAt : new Date().toISOString(),
   };
 }
@@ -244,6 +254,153 @@ export function setGuestIgnored(chart: ChartState, input: SetGuestIgnoredInput, 
   return touch({ ...chart, tables, ignoredGuestIds: nextIgnoredGuestIds });
 }
 
+export function updateGuestMetadata(
+  chart: ChartState,
+  input: UpdateGuestMetadataInput,
+  validGuestIds: Set<string>,
+): ChartState {
+  if (!validGuestIds.has(input.guestId)) {
+    throw new StateMutationError("Guest not found");
+  }
+
+  const currentMetadata = chart.guestMetadata[input.guestId] ?? emptyGuestMetadata();
+  const nextMetadata: GuestMetadata = {
+    tags: input.tags === undefined ? currentMetadata.tags : normalizeTags(input.tags),
+    note: input.note === undefined ? currentMetadata.note : normalizeNote(input.note),
+  };
+  const guestMetadata = { ...chart.guestMetadata };
+
+  if (nextMetadata.tags.length === 0 && nextMetadata.note.length === 0) {
+    delete guestMetadata[input.guestId];
+  } else {
+    guestMetadata[input.guestId] = nextMetadata;
+  }
+
+  if (metadataEqual(currentMetadata, nextMetadata)) {
+    return chart;
+  }
+
+  return touch({ ...chart, guestMetadata });
+}
+
+export function bulkUpdateGuests(chart: ChartState, input: BulkUpdateGuestsInput, validGuestIds: Set<string>): ChartState {
+  const guestIds = [...new Set(input.guestIds)].filter(Boolean);
+  if (guestIds.length === 0) {
+    throw new StateMutationError("Select at least one guest");
+  }
+
+  guestIds.forEach((guestId) => {
+    if (!validGuestIds.has(guestId)) {
+      throw new StateMutationError("Guest not found");
+    }
+  });
+
+  const ignoredGuestIds = new Set(chart.ignoredGuestIds);
+  const guestMetadata = { ...chart.guestMetadata };
+  const addTag = input.addTag === undefined ? null : normalizeSingleTag(input.addTag);
+  const removeTag = input.removeTag === undefined ? null : normalizeSingleTag(input.removeTag);
+  let changed = false;
+
+  guestIds.forEach((guestId) => {
+    if (input.ignored === true && !ignoredGuestIds.has(guestId)) {
+      ignoredGuestIds.add(guestId);
+      changed = true;
+    }
+    if (input.ignored === false && ignoredGuestIds.delete(guestId)) {
+      changed = true;
+    }
+
+    if (addTag || removeTag) {
+      const metadata = guestMetadata[guestId] ?? emptyGuestMetadata();
+      let tags = metadata.tags;
+      if (addTag && !tags.includes(addTag)) {
+        tags = normalizeTags([...tags, addTag]);
+      }
+      if (removeTag) {
+        tags = tags.filter((tag) => tag !== removeTag);
+      }
+
+      if (!arraysEqual(metadata.tags, tags)) {
+        changed = true;
+        if (tags.length === 0 && metadata.note.length === 0) {
+          delete guestMetadata[guestId];
+        } else {
+          guestMetadata[guestId] = { ...metadata, tags };
+        }
+      }
+    }
+  });
+
+  let removedSeatedGuest = false;
+  const tables = chart.tables.map((table) => ({
+    ...table,
+    seats: table.seats.map((seat) => {
+      if (input.ignored === true && seat.guestId && ignoredGuestIds.has(seat.guestId)) {
+        removedSeatedGuest = true;
+        return { ...seat, guestId: null };
+      }
+
+      return { ...seat };
+    }),
+  }));
+
+  if (!changed && !removedSeatedGuest) {
+    return chart;
+  }
+
+  return touch({
+    ...chart,
+    tables,
+    ignoredGuestIds: [...ignoredGuestIds].sort(),
+    guestMetadata,
+  });
+}
+
+export function seatPartyAtTable(
+  chart: ChartState,
+  input: SeatPartyAtTableInput,
+  partyGuestIds: string[],
+): ChartState {
+  const activeGuestIds = partyGuestIds.filter((guestId) => !chart.ignoredGuestIds.includes(guestId));
+  if (activeGuestIds.length === 0) {
+    throw new StateMutationError("Party has no active guests to seat");
+  }
+
+  const tableIndex = chart.tables.findIndex((table) => table.id === input.tableId);
+  if (tableIndex === -1) {
+    throw new StateMutationError("Table not found");
+  }
+
+  const activeGuestIdSet = new Set(activeGuestIds);
+  const tables = chart.tables.map((table) => ({
+    ...table,
+    seats: table.seats.map((seat) => ({
+      ...seat,
+      guestId: seat.guestId && activeGuestIdSet.has(seat.guestId) ? null : seat.guestId,
+    })),
+  }));
+  const targetTable = tables[tableIndex];
+  if (!targetTable) {
+    throw new StateMutationError("Table not found");
+  }
+
+  const openSeats = targetTable.seats.filter((seat) => seat.guestId === null);
+  if (openSeats.length < activeGuestIds.length) {
+    throw new StateMutationError(`Not enough open seats at ${targetTable.name} for this party`);
+  }
+
+  activeGuestIds.forEach((guestId, index) => {
+    const seat = openSeats[index];
+    if (!seat) {
+      throw new StateMutationError("Not enough open seats for this party");
+    }
+
+    targetTable.seats[seat.index] = { index: seat.index, guestId };
+  });
+
+  return touch({ ...chart, tables });
+}
+
 export function clearSeat(chart: ChartState, input: ClearSeatInput): ChartState {
   const tableIndex = chart.tables.findIndex((table) => table.id === input.tableId);
   if (tableIndex === -1) {
@@ -309,6 +466,69 @@ function normalizeIgnoredGuestIds(value: unknown, validGuestIds: Set<string>): S
   }
 
   return new Set(value.filter((guestId): guestId is string => typeof guestId === "string" && validGuestIds.has(guestId)));
+}
+
+function normalizeGuestMetadata(value: unknown, validGuestIds: Set<string>): Record<string, GuestMetadata> {
+  if (!isObject(value)) {
+    return {};
+  }
+
+  const metadata: Record<string, GuestMetadata> = {};
+  Object.entries(value).forEach(([guestId, rawMetadata]) => {
+    if (!validGuestIds.has(guestId) || !isObject(rawMetadata)) {
+      return;
+    }
+
+    const tags = Array.isArray(rawMetadata.tags) ? normalizePersistedTags(rawMetadata.tags) : [];
+    const note = normalizeNote(rawMetadata.note);
+    if (tags.length > 0 || note.length > 0) {
+      metadata[guestId] = { tags, note };
+    }
+  });
+
+  return metadata;
+}
+
+function emptyGuestMetadata(): GuestMetadata {
+  return { tags: [], note: "" };
+}
+
+function normalizeTags(values: unknown[]): string[] {
+  const tags = values.map(normalizeSingleTag).filter(Boolean);
+  return [...new Set(tags)].sort().slice(0, MAX_TAGS_PER_GUEST);
+}
+
+function normalizePersistedTags(values: unknown[]): string[] {
+  const tags = values
+    .filter((value): value is string => typeof value === "string")
+    .map((value) => value.trim().replace(/\s+/g, " ").slice(0, MAX_TAG_LENGTH))
+    .filter(Boolean);
+  return [...new Set(tags)].sort().slice(0, MAX_TAGS_PER_GUEST);
+}
+
+function normalizeSingleTag(value: unknown): string {
+  if (typeof value !== "string") {
+    throw new StateMutationError("Tag must be text");
+  }
+
+  const tag = value.trim().replace(/\s+/g, " ").slice(0, MAX_TAG_LENGTH);
+  if (!tag) {
+    throw new StateMutationError("Tag cannot be empty");
+  }
+
+  return tag;
+}
+
+function normalizeNote(value: unknown): string {
+  if (typeof value !== "string") {
+    return "";
+  }
+
+  return value.trim().slice(0, MAX_NOTE_LENGTH);
+}
+
+function metadataEqual(first: GuestMetadata, second: GuestMetadata): boolean {
+  return first.note === second.note && arraysEqual(first.tags, second.tags);
 }
 
 function arraysEqual(first: string[], second: string[]): boolean {

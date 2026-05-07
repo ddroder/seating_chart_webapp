@@ -11,6 +11,11 @@ There is intentionally no authentication. Anyone who can reach the app on the ne
 - Seat-count reductions are blocked when they would remove an occupied seat.
 - One guest can only be assigned to one seat at a time.
 - Guests can be marked ignored, which excludes vendors or other non-seated people from seating progress.
+- Guest tags and notes for seating constraints like vendor, family, needs aisle, or do not seat near.
+- Bulk guest actions for ignoring, including, and tagging many guests at once.
+- Party-aware seating that moves all active party members to a selected table when capacity allows.
+- Timestamped history snapshots with restore support for bad edits.
+- Printable export view for seating charts and table assignments. Notes are hidden unless explicitly enabled.
 - Connected browsers receive live updates through Socket.IO.
 - Tables can be dragged around the shared canvas.
 - Guest search supports name, party label, and relationship.
@@ -59,8 +64,15 @@ Open `http://<server-ip>:3000` from any device on the network.
 
 - `GUEST_WORKBOOK`: path to the guest workbook. Defaults to `export.xlsx` in the project root.
 - `STATE_FILE`: path to the saved chart JSON. Defaults to `data/seating-chart.json`.
+- `HISTORY_DIR`: path to timestamped chart snapshots. Defaults to `data/history`.
 - `HOST`: listen host. Defaults to `0.0.0.0`.
 - `PORT`: listen port. Defaults to `3000`.
+
+## Data Safety
+
+The current seating chart is stored in `data/seating-chart.json`. Normal rebuilds do not remove this file.
+
+Every successful edit also writes a timestamped snapshot to `data/history`. The app keeps the last 500 snapshots and anything from the last 30 days.
 
 ## Verification
 

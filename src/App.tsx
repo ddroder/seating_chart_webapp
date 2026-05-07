@@ -5,14 +5,19 @@ import type { Socket } from "socket.io-client";
 
 import type {
   AppSnapshot,
+  BulkUpdateGuestsInput,
   ClearSeatInput,
   ClientToServerEvents,
   Guest,
+  GuestMetadata,
+  GuestParty,
+  HistoryEntrySummary,
   MutationAck,
   SeatAssignment,
   SeatingTable,
   ServerToClientEvents,
   TableShape,
+  UpdateGuestMetadataInput,
   UpdateTableInput,
 } from "../shared/types";
 
@@ -34,9 +39,18 @@ interface DragState {
   startY: number;
 }
 
+interface PrintOptions {
+  includeIgnored: boolean;
+  includeUnseated: boolean;
+  includeNotes: boolean;
+  compact: boolean;
+}
+
 const ROUND_STAGE_SIZE = 320;
 const RECT_STAGE_WIDTH = 380;
 const RECT_STAGE_HEIGHT = 280;
+const TAG_PRESETS = ["vendor", "family", "wedding party", "do not seat near", "needs aisle", "child", "high priority"];
+const EMPTY_METADATA: GuestMetadata = { tags: [], note: "" };
 
 export default function App() {
   const [snapshot, setSnapshot] = useState<AppSnapshot | null>(null);
@@ -44,11 +58,23 @@ export default function App() {
   const [connectionState, setConnectionState] = useState<ConnectionState>("connecting");
   const [notice, setNotice] = useState<string | null>(null);
   const [selectedGuestId, setSelectedGuestId] = useState<string | null>(null);
+  const [selectedTableId, setSelectedTableId] = useState<string | null>(null);
+  const [selectedGuestIds, setSelectedGuestIds] = useState<Set<string>>(new Set());
   const [search, setSearch] = useState("");
   const deferredSearch = useDeferredValue(search);
   const [guestFilter, setGuestFilter] = useState<GuestFilter>("unseated");
   const [newTableShape, setNewTableShape] = useState<TableShape>("round");
   const [newTableSeats, setNewTableSeats] = useState(10);
+  const [bulkTag, setBulkTag] = useState("");
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyEntries, setHistoryEntries] = useState<HistoryEntrySummary[]>([]);
+  const [printMode, setPrintMode] = useState(false);
+  const [printOptions, setPrintOptions] = useState<PrintOptions>({
+    includeIgnored: false,
+    includeUnseated: true,
+    includeNotes: false,
+    compact: false,
+  });
   const [dragState, setDragState] = useState<DragState | null>(null);
   const [localPositions, setLocalPositions] = useState<Record<string, { x: number; y: number }>>({});
   const localPositionsRef = useRef(localPositions);
@@ -126,14 +152,19 @@ export default function App() {
   }, [dragState, socket]);
 
   const guestsById = new Map(snapshot?.guests.map((guest) => [guest.id, guest]) ?? []);
+  const partiesById = new Map(snapshot?.parties.map((party) => [party.id, party]) ?? []);
   const assignments = buildAssignments(snapshot?.chart.tables ?? []);
   const seatedGuestIds = new Set(assignments.keys());
   const ignoredGuestIds = new Set(snapshot?.chart.ignoredGuestIds ?? []);
+  const metadataByGuestId = snapshot?.chart.guestMetadata ?? {};
   const selectedGuest = selectedGuestId ? guestsById.get(selectedGuestId) ?? null : null;
   const selectedGuestIgnored = selectedGuestId ? ignoredGuestIds.has(selectedGuestId) : false;
+  const selectedGuestMetadata = selectedGuestId ? metadataByGuestId[selectedGuestId] ?? EMPTY_METADATA : EMPTY_METADATA;
+  const selectedTable = selectedTableId ? snapshot?.chart.tables.find((table) => table.id === selectedTableId) ?? null : null;
   const seatedCount = [...seatedGuestIds].filter((guestId) => !ignoredGuestIds.has(guestId)).length;
   const ignoredCount = ignoredGuestIds.size;
   const totalGuests = (snapshot?.guests.length ?? 0) - ignoredCount;
+  const tagOptions = buildTagOptions(metadataByGuestId);
 
   function handleAck(result: MutationAck) {
     if (result.ok) {
@@ -198,6 +229,43 @@ export default function App() {
     socket.emit("guest:ignore", { guestId, ignored }, handleAck);
   }
 
+  function updateGuestMetadata(input: UpdateGuestMetadataInput) {
+    if (!socket) {
+      setNotice("Not connected to the seating chart server");
+      return;
+    }
+
+    socket.emit("guest:metadata:update", input, handleAck);
+  }
+
+  function bulkUpdateGuests(input: Omit<BulkUpdateGuestsInput, "guestIds">) {
+    if (!socket) {
+      setNotice("Not connected to the seating chart server");
+      return;
+    }
+
+    const guestIds = [...selectedGuestIds];
+    if (guestIds.length === 0) {
+      setNotice("Select at least one guest first");
+      return;
+    }
+
+    socket.emit("guests:bulkUpdate", { guestIds, ...input }, handleAck);
+  }
+
+  function seatPartyAtSelectedTable(partyId: string) {
+    if (!socket) {
+      setNotice("Not connected to the seating chart server");
+      return;
+    }
+    if (!selectedTableId) {
+      setNotice("Select a destination table first");
+      return;
+    }
+
+    socket.emit("party:seatAtTable", { partyId, tableId: selectedTableId }, handleAck);
+  }
+
   function assignSeat(tableId: string, seat: SeatAssignment) {
     if (!socket) {
       setNotice("Not connected to the seating chart server");
@@ -242,6 +310,57 @@ export default function App() {
     });
   }
 
+  function toggleGuestSelection(guestId: string) {
+    setSelectedGuestIds((current) => {
+      const next = new Set(current);
+      if (next.has(guestId)) {
+        next.delete(guestId);
+      } else {
+        next.add(guestId);
+      }
+      return next;
+    });
+  }
+
+  function selectGuestIds(guestIds: string[]) {
+    setSelectedGuestIds((current) => {
+      const next = new Set(current);
+      guestIds.forEach((guestId) => next.add(guestId));
+      return next;
+    });
+  }
+
+  async function loadHistory() {
+    try {
+      const response = await fetch("/api/history");
+      if (!response.ok) {
+        throw new Error("Unable to load history");
+      }
+
+      setHistoryEntries((await response.json()) as HistoryEntrySummary[]);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to load history";
+      setNotice(message);
+    }
+  }
+
+  function restoreHistory(historyId: string) {
+    if (!socket) {
+      setNotice("Not connected to the seating chart server");
+      return;
+    }
+    if (!window.confirm("Restore this snapshot? A safety snapshot of the current chart will be saved first.")) {
+      return;
+    }
+
+    socket.emit("history:restore", { historyId }, (result) => {
+      handleAck(result);
+      if (result.ok) {
+        void loadHistory();
+      }
+    });
+  }
+
   if (!snapshot) {
     return (
       <main className="loading-screen">
@@ -251,6 +370,22 @@ export default function App() {
           {notice ? <p className="error-text">{notice}</p> : null}
         </div>
       </main>
+    );
+  }
+
+  if (printMode) {
+    return (
+      <PrintView
+        snapshot={snapshot}
+        guestsById={guestsById}
+        partiesById={partiesById}
+        assignments={assignments}
+        ignoredGuestIds={ignoredGuestIds}
+        metadataByGuestId={metadataByGuestId}
+        options={printOptions}
+        onChangeOptions={setPrintOptions}
+        onBack={() => setPrintMode(false)}
+      />
     );
   }
 
@@ -266,6 +401,17 @@ export default function App() {
           <span>{snapshot.connectedUsers} connected</span>
           <span>{seatedCount} / {totalGuests} seated</span>
           <span>{ignoredCount} ignored</span>
+          <button type="button" className="ghost-button" onClick={() => setPrintMode(true)}>Print / export</button>
+          <button
+            type="button"
+            className="ghost-button"
+            onClick={() => {
+              setHistoryOpen((open) => !open);
+              void loadHistory();
+            }}
+          >
+            History
+          </button>
         </div>
       </header>
 
@@ -274,6 +420,10 @@ export default function App() {
           <span>{notice}</span>
           <button type="button" onClick={() => setNotice(null)}>Dismiss</button>
         </section>
+      ) : null}
+
+      {historyOpen ? (
+        <HistoryPanel entries={historyEntries} onRefresh={loadHistory} onRestore={restoreHistory} />
       ) : null}
 
       <section className="workspace">
@@ -296,7 +446,7 @@ export default function App() {
             className="text-input"
             value={search}
             onChange={(event) => setSearch(event.target.value)}
-            placeholder="Name, party, relationship"
+            placeholder="Name, party, relationship, tag, note"
           />
 
           <div className="segmented-control" aria-label="guest filter">
@@ -305,6 +455,21 @@ export default function App() {
             <button type="button" className={guestFilter === "seated" ? "active" : ""} onClick={() => setGuestFilter("seated")}>Seated</button>
             <button type="button" className={guestFilter === "ignored" ? "active" : ""} onClick={() => setGuestFilter("ignored")}>Ignored</button>
           </div>
+
+          {selectedGuestIds.size > 0 ? (
+            <BulkActionBar
+              selectedCount={selectedGuestIds.size}
+              bulkTag={bulkTag}
+              onBulkTagChange={setBulkTag}
+              onClearSelection={() => setSelectedGuestIds(new Set())}
+              onIgnore={() => bulkUpdateGuests({ ignored: true })}
+              onInclude={() => bulkUpdateGuests({ ignored: false })}
+              onAddTag={() => {
+                bulkUpdateGuests({ addTag: bulkTag });
+                setBulkTag("");
+              }}
+            />
+          ) : null}
 
           {selectedGuest ? (
             <div className="selected-card">
@@ -325,6 +490,21 @@ export default function App() {
                   <button type="button" onClick={() => setGuestIgnored(selectedGuest.id, true)}>Ignore guest</button>
                 </>
               )}
+              <MetadataEditor
+                guest={selectedGuest}
+                metadata={selectedGuestMetadata}
+                tagOptions={tagOptions}
+                onUpdate={updateGuestMetadata}
+              />
+            </div>
+          ) : null}
+
+          {selectedTable ? (
+            <div className="selected-table-card">
+              <span>Party seating destination</span>
+              <strong>{selectedTable.name}</strong>
+              <small>{selectedTable.seats.filter((seat) => seat.guestId === null).length} currently open seats</small>
+              <button type="button" className="ghost-button" onClick={() => setSelectedTableId(null)}>Clear table</button>
             </div>
           ) : null}
 
@@ -334,12 +514,18 @@ export default function App() {
             assignments={assignments}
             seatedGuestIds={seatedGuestIds}
             ignoredGuestIds={ignoredGuestIds}
+            metadataByGuestId={metadataByGuestId}
+            selectedGuestIds={selectedGuestIds}
+            selectedTable={selectedTable}
             filter={guestFilter}
             search={deferredSearch}
             selectedGuestId={selectedGuestId}
             onSelectGuest={setSelectedGuestId}
             onClearGuest={clearGuest}
             onSetGuestIgnored={setGuestIgnored}
+            onToggleGuestSelection={toggleGuestSelection}
+            onSelectGuestIds={selectGuestIds}
+            onSeatParty={seatPartyAtSelectedTable}
           />
         </aside>
 
@@ -387,6 +573,8 @@ export default function App() {
                 position={localPositions[table.id] ?? { x: table.x, y: table.y }}
                 guestsById={guestsById}
                 selectedGuestId={selectedGuestId}
+                selectedTableId={selectedTableId}
+                onSelectTable={setSelectedTableId}
                 onStartDrag={startTableDrag}
                 onUpdateTable={updateTable}
                 onDeleteTable={deleteTable}
@@ -402,18 +590,162 @@ export default function App() {
   );
 }
 
+interface HistoryPanelProps {
+  entries: HistoryEntrySummary[];
+  onRefresh: () => void;
+  onRestore: (historyId: string) => void;
+}
+
+function HistoryPanel(props: HistoryPanelProps) {
+  return (
+    <section className="history-panel">
+      <div className="panel-heading">
+        <div>
+          <p className="eyebrow">Version history</p>
+          <h2>{props.entries.length} snapshots</h2>
+        </div>
+        <button type="button" className="ghost-button" onClick={props.onRefresh}>Refresh</button>
+      </div>
+      {props.entries.length === 0 ? (
+        <p className="empty-list">No snapshots yet. The next saved edit will create one.</p>
+      ) : (
+        <div className="history-list">
+          {props.entries.slice(0, 50).map((entry) => (
+            <article key={entry.id} className="history-entry">
+              <div>
+                <strong>{new Date(entry.timestamp).toLocaleString()}</strong>
+                <small>{entry.action} - {entry.seatedGuestCount} / {entry.activeGuestCount} seated, {entry.ignoredGuestCount} ignored, {entry.tableCount} tables</small>
+              </div>
+              <button type="button" className="mini-button" onClick={() => props.onRestore(entry.id)}>Restore</button>
+            </article>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+interface BulkActionBarProps {
+  selectedCount: number;
+  bulkTag: string;
+  onBulkTagChange: (tag: string) => void;
+  onClearSelection: () => void;
+  onIgnore: () => void;
+  onInclude: () => void;
+  onAddTag: () => void;
+}
+
+function BulkActionBar(props: BulkActionBarProps) {
+  return (
+    <div className="bulk-action-bar">
+      <strong>{props.selectedCount} selected</strong>
+      <div className="bulk-buttons">
+        <button type="button" onClick={props.onIgnore}>Ignore</button>
+        <button type="button" onClick={props.onInclude}>Include</button>
+        <button type="button" onClick={props.onClearSelection}>Clear</button>
+      </div>
+      <div className="bulk-tag-row">
+        <input value={props.bulkTag} onChange={(event) => props.onBulkTagChange(event.target.value)} placeholder="Tag selected" />
+        <button type="button" onClick={props.onAddTag}>Add tag</button>
+      </div>
+    </div>
+  );
+}
+
+interface MetadataEditorProps {
+  guest: Guest;
+  metadata: GuestMetadata;
+  tagOptions: string[];
+  onUpdate: (input: UpdateGuestMetadataInput) => void;
+}
+
+function MetadataEditor(props: MetadataEditorProps) {
+  const [tagDraft, setTagDraft] = useState("");
+  const [noteDraft, setNoteDraft] = useState(props.metadata.note);
+
+  useEffect(() => {
+    setTagDraft("");
+    setNoteDraft(props.metadata.note);
+  }, [props.guest.id, props.metadata.note]);
+
+  function addTag(tag: string) {
+    const trimmedTag = tag.trim();
+    if (!trimmedTag || props.metadata.tags.includes(trimmedTag)) {
+      return;
+    }
+
+    props.onUpdate({ guestId: props.guest.id, tags: [...props.metadata.tags, trimmedTag] });
+    setTagDraft("");
+  }
+
+  function removeTag(tag: string) {
+    props.onUpdate({ guestId: props.guest.id, tags: props.metadata.tags.filter((candidate) => candidate !== tag) });
+  }
+
+  function saveNote() {
+    if (noteDraft.trim() !== props.metadata.note) {
+      props.onUpdate({ guestId: props.guest.id, note: noteDraft });
+    }
+  }
+
+  return (
+    <div className="metadata-editor">
+      <div className="tag-stack">
+        {props.metadata.tags.length === 0 ? <small>No tags yet.</small> : null}
+        {props.metadata.tags.map((tag) => (
+          <button type="button" key={tag} className="tag-chip removable" onClick={() => removeTag(tag)}>
+            {tag} x
+          </button>
+        ))}
+      </div>
+      <div className="tag-presets">
+        {props.tagOptions.filter((tag) => !props.metadata.tags.includes(tag)).slice(0, 8).map((tag) => (
+          <button type="button" key={tag} onClick={() => addTag(tag)}>{tag}</button>
+        ))}
+      </div>
+      <div className="metadata-row">
+        <input
+          value={tagDraft}
+          onChange={(event) => setTagDraft(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              addTag(tagDraft);
+            }
+          }}
+          placeholder="Custom tag"
+        />
+        <button type="button" onClick={() => addTag(tagDraft)}>Add</button>
+      </div>
+      <textarea
+        value={noteDraft}
+        onChange={(event) => setNoteDraft(event.target.value)}
+        onBlur={saveNote}
+        placeholder="Private seating note. Hidden from print unless enabled."
+        rows={3}
+      />
+    </div>
+  );
+}
+
 interface GuestListProps {
   snapshot: AppSnapshot;
   guestsById: Map<string, Guest>;
   assignments: Map<string, GuestAssignment>;
   seatedGuestIds: Set<string>;
   ignoredGuestIds: Set<string>;
+  metadataByGuestId: Record<string, GuestMetadata>;
+  selectedGuestIds: Set<string>;
+  selectedTable: SeatingTable | null;
   filter: GuestFilter;
   search: string;
   selectedGuestId: string | null;
   onSelectGuest: (guestId: string) => void;
   onClearGuest: (guestId: string) => void;
   onSetGuestIgnored: (guestId: string, ignored: boolean) => void;
+  onToggleGuestSelection: (guestId: string) => void;
+  onSelectGuestIds: (guestIds: string[]) => void;
+  onSeatParty: (partyId: string) => void;
 }
 
 function GuestList(props: GuestListProps) {
@@ -423,30 +755,12 @@ function GuestList(props: GuestListProps) {
       const guests = party.guestIds
         .map((guestId) => props.guestsById.get(guestId))
         .filter(isGuest)
-        .filter((guest) => {
-          const isSeated = props.seatedGuestIds.has(guest.id);
-          const isIgnored = props.ignoredGuestIds.has(guest.id);
-          if (props.filter === "unseated" && (isSeated || isIgnored)) {
-            return false;
-          }
-          if (props.filter === "seated" && (!isSeated || isIgnored)) {
-            return false;
-          }
-          if (props.filter === "ignored" && !isIgnored) {
-            return false;
-          }
-          if (!query) {
-            return true;
-          }
-
-          return `${guest.displayName} ${guest.fullName} ${party.label} ${party.relationship} ${isIgnored ? "ignored" : ""}`
-            .toLowerCase()
-            .includes(query);
-        });
+        .filter((guest) => guestMatchesFilters(guest, party, props, query));
 
       return { party, guests };
     })
     .filter(({ guests }) => guests.length > 0);
+  const visibleGuestIds = visibleParties.flatMap(({ guests }) => guests.map((guest) => guest.id));
 
   if (visibleParties.length === 0) {
     return <p className="empty-list">No guests match this filter.</p>;
@@ -454,56 +768,77 @@ function GuestList(props: GuestListProps) {
 
   return (
     <div className="guest-list">
+      <button type="button" className="ghost-button select-visible-button" onClick={() => props.onSelectGuestIds(visibleGuestIds)}>
+        Select visible ({visibleGuestIds.length})
+      </button>
       {visibleParties.map(({ party, guests }) => (
-        <section key={party.id} className="party-card">
-          <div className="party-heading">
-            <strong>{party.label}</strong>
-            <span>{party.relationship}</span>
-          </div>
-          <div className="guest-stack">
-            {guests.map((guest) => {
-              const assignment = props.assignments.get(guest.id);
-              const isSelected = props.selectedGuestId === guest.id;
-              const isIgnored = props.ignoredGuestIds.has(guest.id);
-              return (
-                <div key={guest.id} className={`guest-row ${isSelected ? "selected" : ""} ${isIgnored ? "ignored" : ""}`}>
-                  <button type="button" onClick={() => props.onSelectGuest(guest.id)}>
-                    <span>{guest.displayName}</span>
-                    <small>{guest.kind}{guestStatusText(isIgnored, assignment)}</small>
-                  </button>
-                  {isIgnored ? (
-                    <button type="button" className="mini-button" onClick={() => props.onSetGuestIgnored(guest.id, false)}>
-                      Include
-                    </button>
-                  ) : assignment ? (
-                    <button type="button" className="mini-button" onClick={() => props.onClearGuest(guest.id)}>
-                      Unseat
-                    </button>
-                  ) : (
-                    <button type="button" className="mini-button" onClick={() => props.onSetGuestIgnored(guest.id, true)}>
-                      Ignore
-                    </button>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        </section>
+        <PartyCard key={party.id} party={party} guests={guests} {...props} />
       ))}
     </div>
   );
 }
 
-function guestStatusText(isIgnored: boolean, assignment: GuestAssignment | undefined): string {
-  if (isIgnored) {
-    return " - ignored";
-  }
+function PartyCard(props: GuestListProps & { party: GuestParty; guests: Guest[] }) {
+  const activePartyGuestIds = props.party.guestIds.filter((guestId) => !props.ignoredGuestIds.has(guestId));
+  const seatedCount = activePartyGuestIds.filter((guestId) => props.assignments.has(guestId)).length;
+  const ignoredCount = props.party.guestIds.length - activePartyGuestIds.length;
+  const availableSeats = props.selectedTable ? openSeatsForParty(props.selectedTable, new Set(activePartyGuestIds)) : 0;
+  const canSeatParty = Boolean(props.selectedTable) && activePartyGuestIds.length > 0 && availableSeats >= activePartyGuestIds.length;
 
-  if (assignment) {
-    return ` - ${assignment.tableName}, seat ${assignment.seatIndex + 1}`;
-  }
-
-  return " - unseated";
+  return (
+    <section className="party-card">
+      <div className="party-heading">
+        <div>
+          <strong>{props.party.label}</strong>
+          <small>{activePartyGuestIds.length} active, {seatedCount} seated, {ignoredCount} ignored</small>
+        </div>
+        <span>{props.party.relationship}</span>
+      </div>
+      {props.selectedTable ? (
+        <button type="button" className="party-seat-button" disabled={!canSeatParty} onClick={() => props.onSeatParty(props.party.id)}>
+          Seat party at {props.selectedTable.name}
+        </button>
+      ) : null}
+      <div className="guest-stack">
+        {props.guests.map((guest) => {
+          const assignment = props.assignments.get(guest.id);
+          const isSelected = props.selectedGuestId === guest.id;
+          const isIgnored = props.ignoredGuestIds.has(guest.id);
+          const metadata = props.metadataByGuestId[guest.id] ?? EMPTY_METADATA;
+          return (
+            <div key={guest.id} className={`guest-row ${isSelected ? "selected" : ""} ${isIgnored ? "ignored" : ""}`}>
+              <input
+                type="checkbox"
+                checked={props.selectedGuestIds.has(guest.id)}
+                onChange={() => props.onToggleGuestSelection(guest.id)}
+                aria-label={`Select ${guest.displayName}`}
+              />
+              <button type="button" onClick={() => props.onSelectGuest(guest.id)}>
+                <span>{guest.displayName}</span>
+                <small>{guest.kind}{guestStatusText(isIgnored, assignment)}</small>
+                {metadata.tags.length > 0 ? (
+                  <span className="guest-tags">{metadata.tags.slice(0, 3).join(", ")}</span>
+                ) : null}
+              </button>
+              {isIgnored ? (
+                <button type="button" className="mini-button" onClick={() => props.onSetGuestIgnored(guest.id, false)}>
+                  Include
+                </button>
+              ) : assignment ? (
+                <button type="button" className="mini-button" onClick={() => props.onClearGuest(guest.id)}>
+                  Unseat
+                </button>
+              ) : (
+                <button type="button" className="mini-button" onClick={() => props.onSetGuestIgnored(guest.id, true)}>
+                  Ignore
+                </button>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
 }
 
 interface TableCardProps {
@@ -511,6 +846,8 @@ interface TableCardProps {
   position: { x: number; y: number };
   guestsById: Map<string, Guest>;
   selectedGuestId: string | null;
+  selectedTableId: string | null;
+  onSelectTable: (tableId: string) => void;
   onStartDrag: (table: SeatingTable, event: PointerEvent<HTMLButtonElement>) => void;
   onUpdateTable: (input: UpdateTableInput) => void;
   onDeleteTable: (tableId: string) => void;
@@ -566,7 +903,7 @@ function TableCard(props: TableCardProps) {
 
   return (
     <article
-      className={`table-card ${props.table.shape}`}
+      className={`table-card ${props.table.shape} ${props.selectedTableId === props.table.id ? "selected-table" : ""}`}
       style={{ left: props.position.x, top: props.position.y }}
     >
       <div className="table-card-header">
@@ -624,6 +961,9 @@ function TableCard(props: TableCardProps) {
           />
         </label>
         <span>{occupiedCount} occupied</span>
+        <button type="button" className="ghost-button" onClick={() => props.onSelectTable(props.table.id)}>
+          Use for parties
+        </button>
       </div>
 
       <div className={`table-stage ${props.table.shape}`}>
@@ -690,6 +1030,168 @@ function SeatButton(props: SeatButtonProps) {
   );
 }
 
+interface PrintViewProps {
+  snapshot: AppSnapshot;
+  guestsById: Map<string, Guest>;
+  partiesById: Map<string, GuestParty>;
+  assignments: Map<string, GuestAssignment>;
+  ignoredGuestIds: Set<string>;
+  metadataByGuestId: Record<string, GuestMetadata>;
+  options: PrintOptions;
+  onChangeOptions: (options: PrintOptions) => void;
+  onBack: () => void;
+}
+
+function PrintView(props: PrintViewProps) {
+  const seatedGuestIds = new Set(props.assignments.keys());
+  const unseatedGuests = props.snapshot.guests.filter((guest) => !props.ignoredGuestIds.has(guest.id) && !seatedGuestIds.has(guest.id));
+  const ignoredGuests = props.snapshot.guests.filter((guest) => props.ignoredGuestIds.has(guest.id));
+
+  return (
+    <main className={`print-shell ${props.options.compact ? "compact" : ""}`}>
+      <section className="print-controls">
+        <button type="button" className="ghost-button" onClick={props.onBack}>Back to editor</button>
+        <button type="button" className="primary-button" onClick={() => window.print()}>Print / save PDF</button>
+        <label>
+          <input
+            type="checkbox"
+            checked={props.options.includeUnseated}
+            onChange={(event) => props.onChangeOptions({ ...props.options, includeUnseated: event.target.checked })}
+          />
+          Include unseated
+        </label>
+        <label>
+          <input
+            type="checkbox"
+            checked={props.options.includeIgnored}
+            onChange={(event) => props.onChangeOptions({ ...props.options, includeIgnored: event.target.checked })}
+          />
+          Include ignored
+        </label>
+        <label>
+          <input
+            type="checkbox"
+            checked={props.options.includeNotes}
+            onChange={(event) => props.onChangeOptions({ ...props.options, includeNotes: event.target.checked })}
+          />
+          Include notes
+        </label>
+        <label>
+          <input
+            type="checkbox"
+            checked={props.options.compact}
+            onChange={(event) => props.onChangeOptions({ ...props.options, compact: event.target.checked })}
+          />
+          Compact
+        </label>
+      </section>
+
+      <section className="print-header">
+        <p className="eyebrow">Printable export</p>
+        <h1>Wedding Seating Chart</h1>
+        <p>Generated {new Date().toLocaleString()}</p>
+      </section>
+
+      <section className="print-tables">
+        {props.snapshot.chart.tables.map((table) => (
+          <article key={table.id} className={`print-table ${table.shape}`}>
+            <div>
+              <h2>{table.name}</h2>
+              <span>{table.shape}, {table.seatCount} seats</span>
+            </div>
+            <ol>
+              {table.seats.map((seat) => {
+                const guest = seat.guestId ? props.guestsById.get(seat.guestId) ?? null : null;
+                const party = guest ? props.partiesById.get(guest.partyId) ?? null : null;
+                const metadata = guest ? props.metadataByGuestId[guest.id] ?? EMPTY_METADATA : EMPTY_METADATA;
+                return (
+                  <li key={seat.index}>
+                    <strong>Seat {seat.index + 1}: {guest?.displayName ?? "Open"}</strong>
+                    {party ? <span>{party.label}</span> : null}
+                    {metadata.tags.length > 0 ? <small>{metadata.tags.join(", ")}</small> : null}
+                    {props.options.includeNotes && metadata.note ? <small>{metadata.note}</small> : null}
+                  </li>
+                );
+              })}
+            </ol>
+          </article>
+        ))}
+      </section>
+
+      {props.options.includeUnseated ? (
+        <PrintGuestSection title="Unseated Active Guests" guests={unseatedGuests} metadataByGuestId={props.metadataByGuestId} includeNotes={props.options.includeNotes} />
+      ) : null}
+      {props.options.includeIgnored ? (
+        <PrintGuestSection title="Ignored Guests" guests={ignoredGuests} metadataByGuestId={props.metadataByGuestId} includeNotes={props.options.includeNotes} />
+      ) : null}
+    </main>
+  );
+}
+
+function PrintGuestSection(props: {
+  title: string;
+  guests: Guest[];
+  metadataByGuestId: Record<string, GuestMetadata>;
+  includeNotes: boolean;
+}) {
+  if (props.guests.length === 0) {
+    return null;
+  }
+
+  return (
+    <section className="print-guest-section">
+      <h2>{props.title}</h2>
+      <ul>
+        {props.guests.map((guest) => {
+          const metadata = props.metadataByGuestId[guest.id] ?? EMPTY_METADATA;
+          return (
+            <li key={guest.id}>
+              <strong>{guest.displayName}</strong>
+              {metadata.tags.length > 0 ? <span>{metadata.tags.join(", ")}</span> : null}
+              {props.includeNotes && metadata.note ? <small>{metadata.note}</small> : null}
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
+}
+
+function guestMatchesFilters(guest: Guest, party: GuestParty, props: GuestListProps, query: string): boolean {
+  const isSeated = props.seatedGuestIds.has(guest.id);
+  const isIgnored = props.ignoredGuestIds.has(guest.id);
+  const metadata = props.metadataByGuestId[guest.id] ?? EMPTY_METADATA;
+
+  if (props.filter === "unseated" && (isSeated || isIgnored)) {
+    return false;
+  }
+  if (props.filter === "seated" && (!isSeated || isIgnored)) {
+    return false;
+  }
+  if (props.filter === "ignored" && !isIgnored) {
+    return false;
+  }
+  if (!query) {
+    return true;
+  }
+
+  return `${guest.displayName} ${guest.fullName} ${party.label} ${party.relationship} ${metadata.tags.join(" ")} ${metadata.note} ${isIgnored ? "ignored" : ""}`
+    .toLowerCase()
+    .includes(query);
+}
+
+function guestStatusText(isIgnored: boolean, assignment: GuestAssignment | undefined): string {
+  if (isIgnored) {
+    return " - ignored";
+  }
+
+  if (assignment) {
+    return ` - ${assignment.tableName}, seat ${assignment.seatIndex + 1}`;
+  }
+
+  return " - unseated";
+}
+
 function buildAssignments(tables: SeatingTable[]): Map<string, GuestAssignment> {
   const assignments = new Map<string, GuestAssignment>();
   tables.forEach((table) => {
@@ -707,6 +1209,15 @@ function buildAssignments(tables: SeatingTable[]): Map<string, GuestAssignment> 
   });
 
   return assignments;
+}
+
+function buildTagOptions(metadataByGuestId: Record<string, GuestMetadata>): string[] {
+  const tags = Object.values(metadataByGuestId).flatMap((metadata) => metadata.tags);
+  return [...new Set([...TAG_PRESETS, ...tags])].sort();
+}
+
+function openSeatsForParty(table: SeatingTable, partyGuestIds: Set<string>): number {
+  return table.seats.filter((seat) => seat.guestId === null || partyGuestIds.has(seat.guestId)).length;
 }
 
 function seatStyle(table: SeatingTable, index: number): CSSProperties {

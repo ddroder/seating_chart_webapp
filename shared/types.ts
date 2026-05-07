@@ -33,11 +33,27 @@ export interface SeatingTable {
   seats: SeatAssignment[];
 }
 
+export interface GuestMetadata {
+  tags: string[];
+  note: string;
+}
+
 export interface ChartState {
-  version: 1;
+  version: 2;
   tables: SeatingTable[];
   ignoredGuestIds: string[];
+  guestMetadata: Record<string, GuestMetadata>;
   updatedAt: string;
+}
+
+export interface HistoryEntrySummary {
+  id: string;
+  timestamp: string;
+  action: string;
+  tableCount: number;
+  activeGuestCount: number;
+  seatedGuestCount: number;
+  ignoredGuestCount: number;
 }
 
 export interface AppSnapshot {
@@ -81,6 +97,28 @@ export interface SetGuestIgnoredInput {
   ignored: boolean;
 }
 
+export interface UpdateGuestMetadataInput {
+  guestId: string;
+  tags?: string[];
+  note?: string;
+}
+
+export interface BulkUpdateGuestsInput {
+  guestIds: string[];
+  ignored?: boolean;
+  addTag?: string;
+  removeTag?: string;
+}
+
+export interface SeatPartyAtTableInput {
+  partyId: string;
+  tableId: string;
+}
+
+export interface RestoreHistoryInput {
+  historyId: string;
+}
+
 export type MutationAck =
   | { ok: true }
   | { ok: false; error: string };
@@ -96,4 +134,8 @@ export interface ClientToServerEvents {
   "seat:assign": (input: AssignSeatInput, ack: (result: MutationAck) => void) => void;
   "seat:clear": (input: ClearSeatInput, ack: (result: MutationAck) => void) => void;
   "guest:ignore": (input: SetGuestIgnoredInput, ack: (result: MutationAck) => void) => void;
+  "guest:metadata:update": (input: UpdateGuestMetadataInput, ack: (result: MutationAck) => void) => void;
+  "guests:bulkUpdate": (input: BulkUpdateGuestsInput, ack: (result: MutationAck) => void) => void;
+  "party:seatAtTable": (input: SeatPartyAtTableInput, ack: (result: MutationAck) => void) => void;
+  "history:restore": (input: RestoreHistoryInput, ack: (result: MutationAck) => void) => void;
 }
