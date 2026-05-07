@@ -8,6 +8,10 @@ import type {
   BulkUpdateGuestsInput,
   ClearSeatInput,
   ClientToServerEvents,
+  CreateFloorPlanObjectInput,
+  DeleteFloorPlanObjectInput,
+  FloorPlanObject,
+  FloorPlanObjectKind,
   Guest,
   GuestMetadata,
   GuestParty,
@@ -16,7 +20,10 @@ import type {
   SeatAssignment,
   SeatingTable,
   ServerToClientEvents,
+  SetChartLockedInput,
+  SetTableLockedInput,
   TableShape,
+  UpdateFloorPlanObjectInput,
   UpdateGuestMetadataInput,
   UpdateTableInput,
 } from "../shared/types";
@@ -32,7 +39,8 @@ interface GuestAssignment {
 }
 
 interface DragState {
-  tableId: string;
+  type: "table" | "floor";
+  id: string;
   startPointerX: number;
   startPointerY: number;
   startX: number;
@@ -42,7 +50,6 @@ interface DragState {
 interface PrintOptions {
   includeIgnored: boolean;
   includeUnseated: boolean;
-  includeNotes: boolean;
   compact: boolean;
 }
 
@@ -51,6 +58,7 @@ const RECT_STAGE_WIDTH = 380;
 const RECT_STAGE_HEIGHT = 280;
 const TAG_PRESETS = ["vendor", "family", "wedding party", "do not seat near", "needs aisle", "child", "high priority"];
 const EMPTY_METADATA: GuestMetadata = { tags: [], note: "" };
+const FLOOR_OBJECT_KINDS: FloorPlanObjectKind[] = ["dance-floor", "bar", "dj", "head-table", "door", "wall", "label", "blocked-area"];
 
 export default function App() {
   const [snapshot, setSnapshot] = useState<AppSnapshot | null>(null);
@@ -65,6 +73,8 @@ export default function App() {
   const [guestFilter, setGuestFilter] = useState<GuestFilter>("unseated");
   const [newTableShape, setNewTableShape] = useState<TableShape>("round");
   const [newTableSeats, setNewTableSeats] = useState(10);
+  const [newFloorObjectKind, setNewFloorObjectKind] = useState<FloorPlanObjectKind>("dance-floor");
+  const [newFloorObjectLabel, setNewFloorObjectLabel] = useState("");
   const [bulkTag, setBulkTag] = useState("");
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historyEntries, setHistoryEntries] = useState<HistoryEntrySummary[]>([]);
@@ -72,7 +82,6 @@ export default function App() {
   const [printOptions, setPrintOptions] = useState<PrintOptions>({
     includeIgnored: false,
     includeUnseated: true,
-    includeNotes: false,
     compact: false,
   });
   const [dragState, setDragState] = useState<DragState | null>(null);
@@ -128,15 +137,19 @@ export default function App() {
     function handlePointerMove(event: globalThis.PointerEvent) {
       const x = Math.max(0, activeDrag.startX + event.clientX - activeDrag.startPointerX);
       const y = Math.max(0, activeDrag.startY + event.clientY - activeDrag.startPointerY);
-      setLocalPositions((current) => ({ ...current, [activeDrag.tableId]: { x, y } }));
+      setLocalPositions((current) => ({ ...current, [activeDrag.id]: { x, y } }));
     }
 
     function handlePointerUp() {
-      const position = localPositionsRef.current[activeDrag.tableId] ?? { x: activeDrag.startX, y: activeDrag.startY };
-      activeSocket.emit("table:update", { tableId: activeDrag.tableId, x: position.x, y: position.y }, handleAck);
+      const position = localPositionsRef.current[activeDrag.id] ?? { x: activeDrag.startX, y: activeDrag.startY };
+      if (activeDrag.type === "table") {
+        activeSocket.emit("table:update", { tableId: activeDrag.id, x: position.x, y: position.y }, handleAck);
+      } else {
+        activeSocket.emit("floor:update", { objectId: activeDrag.id, x: position.x, y: position.y }, handleAck);
+      }
       setLocalPositions((current) => {
         const next = { ...current };
-        delete next[activeDrag.tableId];
+        delete next[activeDrag.id];
         return next;
       });
       setDragState(null);
@@ -151,6 +164,14 @@ export default function App() {
     };
   }, [dragState, socket]);
 
+  useEffect(() => {
+    if (!snapshot) {
+      return;
+    }
+
+    void loadHistory();
+  }, [snapshot?.chart.updatedAt]);
+
   const guestsById = new Map(snapshot?.guests.map((guest) => [guest.id, guest]) ?? []);
   const partiesById = new Map(snapshot?.parties.map((party) => [party.id, party]) ?? []);
   const assignments = buildAssignments(snapshot?.chart.tables ?? []);
@@ -164,6 +185,7 @@ export default function App() {
   const seatedCount = [...seatedGuestIds].filter((guestId) => !ignoredGuestIds.has(guestId)).length;
   const ignoredCount = ignoredGuestIds.size;
   const totalGuests = (snapshot?.guests.length ?? 0) - ignoredCount;
+  const capacity = snapshot ? buildCapacitySummary(snapshot, ignoredGuestIds, seatedGuestIds) : null;
   const tagOptions = buildTagOptions(metadataByGuestId);
 
   function handleAck(result: MutationAck) {
@@ -191,6 +213,51 @@ export default function App() {
     }
 
     socket.emit("table:update", input, handleAck);
+  }
+
+  function setChartLocked(input: SetChartLockedInput) {
+    if (!socket) {
+      setNotice("Not connected to the seating chart server");
+      return;
+    }
+
+    socket.emit("chart:lock", input, handleAck);
+  }
+
+  function setTableLocked(input: SetTableLockedInput) {
+    if (!socket) {
+      setNotice("Not connected to the seating chart server");
+      return;
+    }
+
+    socket.emit("table:lock", input, handleAck);
+  }
+
+  function createFloorPlanObject(input: CreateFloorPlanObjectInput) {
+    if (!socket) {
+      setNotice("Not connected to the seating chart server");
+      return;
+    }
+
+    socket.emit("floor:create", input, handleAck);
+  }
+
+  function updateFloorPlanObject(input: UpdateFloorPlanObjectInput) {
+    if (!socket) {
+      setNotice("Not connected to the seating chart server");
+      return;
+    }
+
+    socket.emit("floor:update", input, handleAck);
+  }
+
+  function deleteFloorPlanObject(input: DeleteFloorPlanObjectInput) {
+    if (!socket) {
+      setNotice("Not connected to the seating chart server");
+      return;
+    }
+
+    socket.emit("floor:delete", input, handleAck);
   }
 
   function deleteTable(tableId: string) {
@@ -302,11 +369,28 @@ export default function App() {
 
     event.preventDefault();
     setDragState({
-      tableId: table.id,
+      type: "table",
+      id: table.id,
       startPointerX: event.clientX,
       startPointerY: event.clientY,
       startX: localPositions[table.id]?.x ?? table.x,
       startY: localPositions[table.id]?.y ?? table.y,
+    });
+  }
+
+  function startFloorObjectDrag(object: FloorPlanObject, event: PointerEvent<HTMLButtonElement>) {
+    if (event.button !== 0) {
+      return;
+    }
+
+    event.preventDefault();
+    setDragState({
+      type: "floor",
+      id: object.id,
+      startPointerX: event.clientX,
+      startPointerY: event.clientY,
+      startX: localPositions[object.id]?.x ?? object.x,
+      startY: localPositions[object.id]?.y ?? object.y,
     });
   }
 
@@ -361,6 +445,24 @@ export default function App() {
     });
   }
 
+  function undoLastAction() {
+    const previousEntry = historyEntries[1];
+    if (!previousEntry) {
+      setNotice("There is no previous snapshot to restore");
+      return;
+    }
+
+    restoreHistory(previousEntry.id);
+  }
+
+  function downloadCsvExport() {
+    if (!snapshot) {
+      return;
+    }
+
+    downloadCsv("seating-chart-assignments.csv", buildCsvExport(snapshot, guestsById, partiesById, ignoredGuestIds, metadataByGuestId));
+  }
+
   if (!snapshot) {
     return (
       <main className="loading-screen">
@@ -401,7 +503,12 @@ export default function App() {
           <span>{snapshot.connectedUsers} connected</span>
           <span>{seatedCount} / {totalGuests} seated</span>
           <span>{ignoredCount} ignored</span>
+          {snapshot.chart.locked ? <span className="status-pill offline">chart locked</span> : null}
           <button type="button" className="ghost-button" onClick={() => setPrintMode(true)}>Print / export</button>
+          <button type="button" className="ghost-button" onClick={downloadCsvExport}>CSV export</button>
+          <button type="button" className="ghost-button" onClick={() => setChartLocked({ locked: !snapshot.chart.locked })}>
+            {snapshot.chart.locked ? "Unlock chart" : "Lock chart"}
+          </button>
           <button
             type="button"
             className="ghost-button"
@@ -425,6 +532,11 @@ export default function App() {
       {historyOpen ? (
         <HistoryPanel entries={historyEntries} onRefresh={loadHistory} onRestore={restoreHistory} />
       ) : null}
+
+      <section className="dashboard-grid">
+        {capacity ? <CapacityDashboard summary={capacity} /> : null}
+        <RecentActivity entries={historyEntries.slice(0, 5)} onUndo={undoLastAction} canUndo={historyEntries.length > 1} />
+      </section>
 
       <section className="workspace">
         <aside className="guest-panel" aria-label="guest list">
@@ -553,7 +665,28 @@ export default function App() {
                   onChange={(event) => setNewTableSeats(Number(event.target.value))}
                 />
               </label>
-              <button type="button" className="primary-button" onClick={createNewTable}>Add table</button>
+              <button type="button" className="primary-button" disabled={snapshot.chart.locked} onClick={createNewTable}>Add table</button>
+              <label>
+                Floor item
+                <select value={newFloorObjectKind} onChange={(event) => setNewFloorObjectKind(event.target.value as FloorPlanObjectKind)}>
+                  {FLOOR_OBJECT_KINDS.map((kind) => <option key={kind} value={kind}>{formatFloorObjectKind(kind)}</option>)}
+                </select>
+              </label>
+              <label>
+                Label
+                <input value={newFloorObjectLabel} onChange={(event) => setNewFloorObjectLabel(event.target.value)} placeholder="Optional" />
+              </label>
+              <button
+                type="button"
+                className="primary-button floor-button"
+                disabled={snapshot.chart.locked}
+                onClick={() => {
+                  createFloorPlanObject({ kind: newFloorObjectKind, label: newFloorObjectLabel });
+                  setNewFloorObjectLabel("");
+                }}
+              >
+                Add floor item
+              </button>
             </div>
           </div>
 
@@ -566,6 +699,18 @@ export default function App() {
               </div>
             ) : null}
 
+            {snapshot.chart.floorPlanObjects.map((object) => (
+              <FloorObjectCard
+                key={object.id}
+                object={object}
+                position={localPositions[object.id] ?? { x: object.x, y: object.y }}
+                chartLocked={snapshot.chart.locked}
+                onStartDrag={startFloorObjectDrag}
+                onUpdate={updateFloorPlanObject}
+                onDelete={deleteFloorPlanObject}
+              />
+            ))}
+
             {snapshot.chart.tables.map((table) => (
               <TableCard
                 key={table.id}
@@ -574,10 +719,12 @@ export default function App() {
                 guestsById={guestsById}
                 selectedGuestId={selectedGuestId}
                 selectedTableId={selectedTableId}
+                chartLocked={snapshot.chart.locked}
                 onSelectTable={setSelectedTableId}
                 onStartDrag={startTableDrag}
                 onUpdateTable={updateTable}
                 onDeleteTable={deleteTable}
+                onSetTableLocked={setTableLocked}
                 onSeatClick={assignSeat}
                 onClearSeat={clearSeat}
                 onLocalError={setNotice}
@@ -594,6 +741,62 @@ interface HistoryPanelProps {
   entries: HistoryEntrySummary[];
   onRefresh: () => void;
   onRestore: (historyId: string) => void;
+}
+
+interface CapacitySummary {
+  totalSeats: number;
+  activeGuests: number;
+  seatedGuests: number;
+  ignoredGuests: number;
+  unseatedGuests: number;
+  openSeats: number;
+  surplusSeats: number;
+}
+
+function CapacityDashboard(props: { summary: CapacitySummary }) {
+  const status = props.summary.surplusSeats >= 0 ? "surplus" : "short";
+  return (
+    <section className={`capacity-dashboard ${status}`}>
+      <div>
+        <p className="eyebrow">Capacity</p>
+        <h2>{props.summary.surplusSeats >= 0 ? `${props.summary.surplusSeats} extra seats` : `${Math.abs(props.summary.surplusSeats)} seats short`}</h2>
+      </div>
+      <dl>
+        <div><dt>Total seats</dt><dd>{props.summary.totalSeats}</dd></div>
+        <div><dt>Active guests</dt><dd>{props.summary.activeGuests}</dd></div>
+        <div><dt>Seated</dt><dd>{props.summary.seatedGuests}</dd></div>
+        <div><dt>Unseated</dt><dd>{props.summary.unseatedGuests}</dd></div>
+        <div><dt>Open seats</dt><dd>{props.summary.openSeats}</dd></div>
+        <div><dt>Ignored</dt><dd>{props.summary.ignoredGuests}</dd></div>
+      </dl>
+    </section>
+  );
+}
+
+function RecentActivity(props: { entries: HistoryEntrySummary[]; canUndo: boolean; onUndo: () => void }) {
+  return (
+    <section className="recent-activity">
+      <div className="panel-heading">
+        <div>
+          <p className="eyebrow">Recent activity</p>
+          <h2>{props.entries.length === 0 ? "No edits yet" : props.entries[0]?.action}</h2>
+        </div>
+        <button type="button" className="ghost-button" disabled={!props.canUndo} onClick={props.onUndo}>Undo last</button>
+      </div>
+      {props.entries.length === 0 ? (
+        <p className="empty-list">Recent edits will appear here.</p>
+      ) : (
+        <ul>
+          {props.entries.slice(0, 4).map((entry) => (
+            <li key={entry.id}>
+              <strong>{entry.action}</strong>
+              <span>{new Date(entry.timestamp).toLocaleTimeString()}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
 }
 
 function HistoryPanel(props: HistoryPanelProps) {
@@ -847,10 +1050,12 @@ interface TableCardProps {
   guestsById: Map<string, Guest>;
   selectedGuestId: string | null;
   selectedTableId: string | null;
+  chartLocked: boolean;
   onSelectTable: (tableId: string) => void;
   onStartDrag: (table: SeatingTable, event: PointerEvent<HTMLButtonElement>) => void;
   onUpdateTable: (input: UpdateTableInput) => void;
   onDeleteTable: (tableId: string) => void;
+  onSetTableLocked: (input: SetTableLockedInput) => void;
   onSeatClick: (tableId: string, seat: SeatAssignment) => void;
   onClearSeat: (input: ClearSeatInput) => void;
   onLocalError: (message: string) => void;
@@ -903,16 +1108,17 @@ function TableCard(props: TableCardProps) {
 
   return (
     <article
-      className={`table-card ${props.table.shape} ${props.selectedTableId === props.table.id ? "selected-table" : ""}`}
+      className={`table-card ${props.table.shape} ${props.selectedTableId === props.table.id ? "selected-table" : ""} ${props.table.locked ? "locked" : ""}`}
       style={{ left: props.position.x, top: props.position.y }}
     >
       <div className="table-card-header">
-        <button type="button" className="drag-handle" onPointerDown={(event) => props.onStartDrag(props.table, event)}>
+        <button type="button" className="drag-handle" disabled={props.chartLocked || props.table.locked} onPointerDown={(event) => props.onStartDrag(props.table, event)}>
           Drag
         </button>
         <input
           className="table-name-input"
           value={draftName}
+          disabled={props.chartLocked || props.table.locked}
           onChange={(event) => setDraftName(event.target.value)}
           onBlur={commitName}
           onKeyDown={(event) => {
@@ -925,7 +1131,7 @@ function TableCard(props: TableCardProps) {
         <button
           type="button"
           className="danger-button"
-          disabled={occupiedCount > 0}
+          disabled={props.chartLocked || props.table.locked || occupiedCount > 0}
           title={occupiedCount > 0 ? "Unseat guests before deleting this table" : "Delete table"}
           onClick={() => props.onDeleteTable(props.table.id)}
         >
@@ -938,6 +1144,7 @@ function TableCard(props: TableCardProps) {
           Shape
           <select
             value={props.table.shape}
+            disabled={props.chartLocked || props.table.locked}
             onChange={(event) => props.onUpdateTable({ tableId: props.table.id, shape: event.target.value as TableShape })}
           >
             <option value="round">Round</option>
@@ -951,6 +1158,7 @@ function TableCard(props: TableCardProps) {
             min={minimumSeatCount}
             max={32}
             value={draftSeatCount}
+            disabled={props.chartLocked || props.table.locked}
             onChange={(event) => setDraftSeatCount(event.target.value)}
             onBlur={commitSeatCount}
             onKeyDown={(event) => {
@@ -963,6 +1171,9 @@ function TableCard(props: TableCardProps) {
         <span>{occupiedCount} occupied</span>
         <button type="button" className="ghost-button" onClick={() => props.onSelectTable(props.table.id)}>
           Use for parties
+        </button>
+        <button type="button" className="ghost-button" disabled={props.chartLocked} onClick={() => props.onSetTableLocked({ tableId: props.table.id, locked: !props.table.locked })}>
+          {props.table.locked ? "Unlock table" : "Lock table"}
         </button>
       </div>
 
@@ -980,6 +1191,7 @@ function TableCard(props: TableCardProps) {
               seat={seat}
               guest={guest}
               selectedGuestId={props.selectedGuestId}
+              disabled={props.chartLocked || props.table.locked}
               onSeatClick={props.onSeatClick}
               onClearSeat={props.onClearSeat}
             />
@@ -990,11 +1202,87 @@ function TableCard(props: TableCardProps) {
   );
 }
 
+interface FloorObjectCardProps {
+  object: FloorPlanObject;
+  position: { x: number; y: number };
+  chartLocked: boolean;
+  onStartDrag: (object: FloorPlanObject, event: PointerEvent<HTMLButtonElement>) => void;
+  onUpdate: (input: UpdateFloorPlanObjectInput) => void;
+  onDelete: (input: DeleteFloorPlanObjectInput) => void;
+}
+
+function FloorObjectCard(props: FloorObjectCardProps) {
+  const [labelDraft, setLabelDraft] = useState(props.object.label);
+  const [widthDraft, setWidthDraft] = useState(String(props.object.width));
+  const [heightDraft, setHeightDraft] = useState(String(props.object.height));
+
+  useEffect(() => {
+    setLabelDraft(props.object.label);
+  }, [props.object.label]);
+
+  useEffect(() => {
+    setWidthDraft(String(props.object.width));
+    setHeightDraft(String(props.object.height));
+  }, [props.object.width, props.object.height]);
+
+  function commitLabel() {
+    if (labelDraft.trim() !== props.object.label) {
+      props.onUpdate({ objectId: props.object.id, label: labelDraft });
+    }
+  }
+
+  function commitSize() {
+    const width = Number(widthDraft);
+    const height = Number(heightDraft);
+    if (Number.isFinite(width) && Number.isFinite(height)) {
+      props.onUpdate({ objectId: props.object.id, width, height });
+      return;
+    }
+
+    setWidthDraft(String(props.object.width));
+    setHeightDraft(String(props.object.height));
+  }
+
+  return (
+    <article
+      className={`floor-object ${props.object.kind}`}
+      style={{ left: props.position.x, top: props.position.y, width: props.object.width, height: props.object.height }}
+    >
+      <div className="floor-object-header">
+        <button type="button" className="drag-handle" disabled={props.chartLocked} onPointerDown={(event) => props.onStartDrag(props.object, event)}>
+          Drag
+        </button>
+        <select
+          value={props.object.kind}
+          disabled={props.chartLocked}
+          onChange={(event) => props.onUpdate({ objectId: props.object.id, kind: event.target.value as FloorPlanObjectKind })}
+        >
+          {FLOOR_OBJECT_KINDS.map((kind) => <option key={kind} value={kind}>{formatFloorObjectKind(kind)}</option>)}
+        </select>
+        <button type="button" className="danger-button" disabled={props.chartLocked} onClick={() => props.onDelete({ objectId: props.object.id })}>Delete</button>
+      </div>
+      <input
+        className="floor-label-input"
+        value={labelDraft}
+        disabled={props.chartLocked}
+        onChange={(event) => setLabelDraft(event.target.value)}
+        onBlur={commitLabel}
+        aria-label="floor plan object label"
+      />
+      <div className="floor-size-row">
+        <input value={widthDraft} disabled={props.chartLocked} onChange={(event) => setWidthDraft(event.target.value)} onBlur={commitSize} aria-label="floor object width" />
+        <input value={heightDraft} disabled={props.chartLocked} onChange={(event) => setHeightDraft(event.target.value)} onBlur={commitSize} aria-label="floor object height" />
+      </div>
+    </article>
+  );
+}
+
 interface SeatButtonProps {
   table: SeatingTable;
   seat: SeatAssignment;
   guest: Guest | null;
   selectedGuestId: string | null;
+  disabled: boolean;
   onSeatClick: (tableId: string, seat: SeatAssignment) => void;
   onClearSeat: (input: ClearSeatInput) => void;
 }
@@ -1010,6 +1298,7 @@ function SeatButton(props: SeatButtonProps) {
       <button
         type="button"
         className="seat-main"
+        disabled={props.disabled}
         title={props.guest?.fullName ?? "Empty seat"}
         onClick={() => props.onSeatClick(props.table.id, props.seat)}
       >
@@ -1020,6 +1309,7 @@ function SeatButton(props: SeatButtonProps) {
         <button
           type="button"
           className="seat-clear"
+          disabled={props.disabled}
           title="Unseat guest"
           onClick={() => props.onClearSeat({ tableId: props.table.id, seatIndex: props.seat.index })}
         >
@@ -1071,14 +1361,6 @@ function PrintView(props: PrintViewProps) {
         <label>
           <input
             type="checkbox"
-            checked={props.options.includeNotes}
-            onChange={(event) => props.onChangeOptions({ ...props.options, includeNotes: event.target.checked })}
-          />
-          Include notes
-        </label>
-        <label>
-          <input
-            type="checkbox"
             checked={props.options.compact}
             onChange={(event) => props.onChangeOptions({ ...props.options, compact: event.target.checked })}
           />
@@ -1091,6 +1373,17 @@ function PrintView(props: PrintViewProps) {
         <h1>Wedding Seating Chart</h1>
         <p>Generated {new Date().toLocaleString()}</p>
       </section>
+
+      {props.snapshot.chart.floorPlanObjects.length > 0 ? (
+        <section className="print-floor-objects">
+          <h2>Floor Plan Details</h2>
+          <ul>
+            {props.snapshot.chart.floorPlanObjects.map((object) => (
+              <li key={object.id}>{object.label} ({formatFloorObjectKind(object.kind)})</li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
 
       <section className="print-tables">
         {props.snapshot.chart.tables.map((table) => (
@@ -1109,7 +1402,6 @@ function PrintView(props: PrintViewProps) {
                     <strong>Seat {seat.index + 1}: {guest?.displayName ?? "Open"}</strong>
                     {party ? <span>{party.label}</span> : null}
                     {metadata.tags.length > 0 ? <small>{metadata.tags.join(", ")}</small> : null}
-                    {props.options.includeNotes && metadata.note ? <small>{metadata.note}</small> : null}
                   </li>
                 );
               })}
@@ -1119,10 +1411,10 @@ function PrintView(props: PrintViewProps) {
       </section>
 
       {props.options.includeUnseated ? (
-        <PrintGuestSection title="Unseated Active Guests" guests={unseatedGuests} metadataByGuestId={props.metadataByGuestId} includeNotes={props.options.includeNotes} />
+        <PrintGuestSection title="Unseated Active Guests" guests={unseatedGuests} metadataByGuestId={props.metadataByGuestId} />
       ) : null}
       {props.options.includeIgnored ? (
-        <PrintGuestSection title="Ignored Guests" guests={ignoredGuests} metadataByGuestId={props.metadataByGuestId} includeNotes={props.options.includeNotes} />
+        <PrintGuestSection title="Ignored Guests" guests={ignoredGuests} metadataByGuestId={props.metadataByGuestId} />
       ) : null}
     </main>
   );
@@ -1132,7 +1424,6 @@ function PrintGuestSection(props: {
   title: string;
   guests: Guest[];
   metadataByGuestId: Record<string, GuestMetadata>;
-  includeNotes: boolean;
 }) {
   if (props.guests.length === 0) {
     return null;
@@ -1148,7 +1439,6 @@ function PrintGuestSection(props: {
             <li key={guest.id}>
               <strong>{guest.displayName}</strong>
               {metadata.tags.length > 0 ? <span>{metadata.tags.join(", ")}</span> : null}
-              {props.includeNotes && metadata.note ? <small>{metadata.note}</small> : null}
             </li>
           );
         })}
@@ -1214,6 +1504,99 @@ function buildAssignments(tables: SeatingTable[]): Map<string, GuestAssignment> 
 function buildTagOptions(metadataByGuestId: Record<string, GuestMetadata>): string[] {
   const tags = Object.values(metadataByGuestId).flatMap((metadata) => metadata.tags);
   return [...new Set([...TAG_PRESETS, ...tags])].sort();
+}
+
+function buildCapacitySummary(snapshot: AppSnapshot, ignoredGuestIds: Set<string>, seatedGuestIds: Set<string>): CapacitySummary {
+  const totalSeats = snapshot.chart.tables.reduce((total, table) => total + table.seatCount, 0);
+  const activeGuests = snapshot.guests.length - ignoredGuestIds.size;
+  const seatedGuests = [...seatedGuestIds].filter((guestId) => !ignoredGuestIds.has(guestId)).length;
+  const unseatedGuests = activeGuests - seatedGuests;
+  const openSeats = snapshot.chart.tables.reduce((total, table) => total + table.seats.filter((seat) => seat.guestId === null).length, 0);
+
+  return {
+    totalSeats,
+    activeGuests,
+    seatedGuests,
+    ignoredGuests: ignoredGuestIds.size,
+    unseatedGuests,
+    openSeats,
+    surplusSeats: totalSeats - activeGuests,
+  };
+}
+
+function buildCsvExport(
+  snapshot: AppSnapshot,
+  guestsById: Map<string, Guest>,
+  partiesById: Map<string, GuestParty>,
+  ignoredGuestIds: Set<string>,
+  metadataByGuestId: Record<string, GuestMetadata>,
+): string {
+  const rows = [["Status", "Table", "Seat", "Guest", "Party", "Relationship", "Tags"]];
+  const assignedGuestIds = new Set<string>();
+
+  snapshot.chart.tables.forEach((table) => {
+    table.seats.forEach((seat) => {
+      const guest = seat.guestId ? guestsById.get(seat.guestId) ?? null : null;
+      if (guest) {
+        assignedGuestIds.add(guest.id);
+      }
+      const party = guest ? partiesById.get(guest.partyId) ?? null : null;
+      const metadata = guest ? metadataByGuestId[guest.id] ?? EMPTY_METADATA : EMPTY_METADATA;
+      rows.push([
+        guest ? "Seated" : "Open",
+        table.name,
+        String(seat.index + 1),
+        guest?.displayName ?? "",
+        party?.label ?? "",
+        party?.relationship ?? "",
+        metadata.tags.join("; "),
+      ]);
+    });
+  });
+
+  snapshot.guests.forEach((guest) => {
+    if (assignedGuestIds.has(guest.id)) {
+      return;
+    }
+
+    const party = partiesById.get(guest.partyId) ?? null;
+    const metadata = metadataByGuestId[guest.id] ?? EMPTY_METADATA;
+    rows.push([
+      ignoredGuestIds.has(guest.id) ? "Ignored" : "Unseated",
+      "",
+      "",
+      guest.displayName,
+      party?.label ?? "",
+      party?.relationship ?? "",
+      metadata.tags.join("; "),
+    ]);
+  });
+
+  return rows.map((row) => row.map(csvCell).join(",")).join("\n");
+}
+
+function csvCell(value: string): string {
+  if (/[,"\n]/.test(value)) {
+    return `"${value.replace(/"/g, '""')}"`;
+  }
+
+  return value;
+}
+
+function downloadCsv(fileName: string, csv: string): void {
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function formatFloorObjectKind(kind: FloorPlanObjectKind): string {
+  return kind.split("-").map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(" ");
 }
 
 function openSeatsForParty(table: SeatingTable, partyGuestIds: Set<string>): number {

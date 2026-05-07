@@ -17,11 +17,16 @@ import type {
 import {
   bulkUpdateGuests,
   clearSeat,
+  createFloorPlanObject,
   createTable,
+  deleteFloorPlanObject,
   deleteTable,
   assignSeat,
   seatPartyAtTable,
+  setChartLocked,
   setGuestIgnored,
+  setTableLocked,
+  updateFloorPlanObject,
   updateGuestMetadata,
   updateTable,
 } from "./state";
@@ -129,6 +134,26 @@ io.on("connection", (socket) => {
 
   socket.on("history:restore", (input, ack) => {
     void restoreHistory(input, ack);
+  });
+
+  socket.on("chart:lock", (input, ack) => {
+    void mutate("chart:lock", ack, (current) => setChartLocked(current, input));
+  });
+
+  socket.on("table:lock", (input, ack) => {
+    void mutate("table:lock", ack, (current) => setTableLocked(current, input));
+  });
+
+  socket.on("floor:create", (input, ack) => {
+    void mutate("floor:create", ack, (current) => createFloorPlanObject(current, input));
+  });
+
+  socket.on("floor:update", (input, ack) => {
+    void mutate("floor:update", ack, (current) => updateFloorPlanObject(current, input));
+  });
+
+  socket.on("floor:delete", (input, ack) => {
+    void mutate("floor:delete", ack, (current) => deleteFloorPlanObject(current, input));
   });
 
   socket.on("disconnect", () => {

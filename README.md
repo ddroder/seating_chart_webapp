@@ -15,7 +15,12 @@ There is intentionally no authentication. Anyone who can reach the app on the ne
 - Bulk guest actions for ignoring, including, and tagging many guests at once.
 - Party-aware seating that moves all active party members to a selected table when capacity allows.
 - Timestamped history snapshots with restore support for bad edits.
-- Printable export view for seating charts and table assignments. Notes are hidden unless explicitly enabled.
+- Printable export view for seating charts and table assignments. Notes are not included in printed exports.
+- Capacity dashboard for total seats, active guests, open seats, shortages, and surplus.
+- CSV export for venue or vendor handoff. Notes are not included in CSV exports.
+- Recent activity with quick undo to the previous saved snapshot.
+- Lock/finalize mode for the whole chart or individual tables to prevent accidental edits.
+- Floor plan objects for dance floor, bar, DJ, head table, doors, walls, labels, and blocked areas.
 - Connected browsers receive live updates through Socket.IO.
 - Tables can be dragged around the shared canvas.
 - Guest search supports name, party label, and relationship.

@@ -5,14 +5,21 @@ import type {
   BulkUpdateGuestsInput,
   ChartState,
   ClearSeatInput,
+  CreateFloorPlanObjectInput,
   CreateTableInput,
+  DeleteFloorPlanObjectInput,
   DeleteTableInput,
+  FloorPlanObject,
+  FloorPlanObjectKind,
   GuestMetadata,
   SeatAssignment,
   SeatPartyAtTableInput,
   SeatingTable,
+  SetChartLockedInput,
   SetGuestIgnoredInput,
+  SetTableLockedInput,
   TableShape,
+  UpdateFloorPlanObjectInput,
   UpdateGuestMetadataInput,
   UpdateTableInput,
 } from "../shared/types";
@@ -23,6 +30,9 @@ const MAX_TABLE_NAME_LENGTH = 48;
 const MAX_TAGS_PER_GUEST = 12;
 const MAX_TAG_LENGTH = 32;
 const MAX_NOTE_LENGTH = 500;
+const MAX_FLOOR_OBJECT_LABEL_LENGTH = 48;
+const MIN_FLOOR_OBJECT_SIZE = 24;
+const MAX_FLOOR_OBJECT_SIZE = 800;
 
 export class StateMutationError extends Error {
   constructor(message: string) {
@@ -33,8 +43,10 @@ export class StateMutationError extends Error {
 
 export function createEmptyChart(): ChartState {
   return {
-    version: 2,
+    version: 3,
+    locked: false,
     tables: [],
+    floorPlanObjects: [],
     ignoredGuestIds: [],
     guestMetadata: {},
     updatedAt: new Date().toISOString(),
@@ -49,6 +61,7 @@ export function normalizeChartState(value: unknown, validGuestIds: Set<string>):
   const usedGuestIds = new Set<string>();
   const ignoredGuestIds = normalizeIgnoredGuestIds(value.ignoredGuestIds, validGuestIds);
   const guestMetadata = normalizeGuestMetadata(value.guestMetadata, validGuestIds);
+  const floorPlanObjects = normalizeFloorPlanObjects(value.floorPlanObjects);
   const tables: SeatingTable[] = [];
 
   value.tables.forEach((rawTable, tableIndex) => {
@@ -64,6 +77,7 @@ export function normalizeChartState(value: unknown, validGuestIds: Set<string>):
       seatCount,
       x: finiteNumber(rawTable.x, 80 + tableIndex * 24),
       y: finiteNumber(rawTable.y, 80 + tableIndex * 24),
+      locked: rawTable.locked === true,
       seats: createSeats(seatCount),
     };
 
@@ -92,8 +106,10 @@ export function normalizeChartState(value: unknown, validGuestIds: Set<string>):
   });
 
   return {
-    version: 2,
+    version: 3,
+    locked: value.locked === true,
     tables,
+    floorPlanObjects,
     ignoredGuestIds: [...ignoredGuestIds].sort(),
     guestMetadata,
     updatedAt: typeof value.updatedAt === "string" ? value.updatedAt : new Date().toISOString(),
@@ -101,6 +117,8 @@ export function normalizeChartState(value: unknown, validGuestIds: Set<string>):
 }
 
 export function createTable(chart: ChartState, input: CreateTableInput): ChartState {
+  assertChartEditable(chart);
+
   const shape = parseShape(input.shape);
   const seatCount = parseSeatCount(input.seatCount);
   const nextTableNumber = chart.tables.length + 1;
@@ -115,6 +133,7 @@ export function createTable(chart: ChartState, input: CreateTableInput): ChartSt
     seatCount,
     x: 72 + column * 360,
     y: 72 + row * 340,
+    locked: false,
     seats: createSeats(seatCount),
   };
 
@@ -122,6 +141,8 @@ export function createTable(chart: ChartState, input: CreateTableInput): ChartSt
 }
 
 export function updateTable(chart: ChartState, input: UpdateTableInput): ChartState {
+  assertChartEditable(chart);
+
   const tableIndex = chart.tables.findIndex((table) => table.id === input.tableId);
   if (tableIndex === -1) {
     throw new StateMutationError("Table not found");
@@ -132,6 +153,7 @@ export function updateTable(chart: ChartState, input: UpdateTableInput): ChartSt
   if (!table) {
     throw new StateMutationError("Table not found");
   }
+  assertTableEditable(table);
 
   if (input.name !== undefined) {
     table.name = normalizeTableName(input.name, table.name);
@@ -164,10 +186,13 @@ export function updateTable(chart: ChartState, input: UpdateTableInput): ChartSt
 }
 
 export function deleteTable(chart: ChartState, input: DeleteTableInput): ChartState {
+  assertChartEditable(chart);
+
   const table = chart.tables.find((candidate) => candidate.id === input.tableId);
   if (!table) {
     throw new StateMutationError("Table not found");
   }
+  assertTableEditable(table);
 
   if (table.seats.some((seat) => seat.guestId !== null)) {
     throw new StateMutationError("Cannot delete an occupied table. Unseat guests first.");
@@ -180,6 +205,8 @@ export function deleteTable(chart: ChartState, input: DeleteTableInput): ChartSt
 }
 
 export function assignSeat(chart: ChartState, input: AssignSeatInput, validGuestIds: Set<string>): ChartState {
+  assertChartEditable(chart);
+
   if (!validGuestIds.has(input.guestId)) {
     throw new StateMutationError("Guest not found");
   }
@@ -198,6 +225,7 @@ export function assignSeat(chart: ChartState, input: AssignSeatInput, validGuest
   if (!table) {
     throw new StateMutationError("Table not found");
   }
+  assertTableEditable(table);
 
   const seat = table.seats[input.seatIndex];
   if (!seat) {
@@ -222,6 +250,8 @@ export function assignSeat(chart: ChartState, input: AssignSeatInput, validGuest
 }
 
 export function setGuestIgnored(chart: ChartState, input: SetGuestIgnoredInput, validGuestIds: Set<string>): ChartState {
+  assertChartEditable(chart);
+
   if (!validGuestIds.has(input.guestId)) {
     throw new StateMutationError("Guest not found");
   }
@@ -238,6 +268,7 @@ export function setGuestIgnored(chart: ChartState, input: SetGuestIgnoredInput, 
     ...table,
     seats: table.seats.map((seat) => {
       if (input.ignored && seat.guestId === input.guestId) {
+        assertTableEditable(table);
         removedSeatedGuest = true;
         return { ...seat, guestId: null };
       }
@@ -259,6 +290,8 @@ export function updateGuestMetadata(
   input: UpdateGuestMetadataInput,
   validGuestIds: Set<string>,
 ): ChartState {
+  assertChartEditable(chart);
+
   if (!validGuestIds.has(input.guestId)) {
     throw new StateMutationError("Guest not found");
   }
@@ -284,6 +317,8 @@ export function updateGuestMetadata(
 }
 
 export function bulkUpdateGuests(chart: ChartState, input: BulkUpdateGuestsInput, validGuestIds: Set<string>): ChartState {
+  assertChartEditable(chart);
+
   const guestIds = [...new Set(input.guestIds)].filter(Boolean);
   if (guestIds.length === 0) {
     throw new StateMutationError("Select at least one guest");
@@ -336,6 +371,7 @@ export function bulkUpdateGuests(chart: ChartState, input: BulkUpdateGuestsInput
     ...table,
     seats: table.seats.map((seat) => {
       if (input.ignored === true && seat.guestId && ignoredGuestIds.has(seat.guestId)) {
+        assertTableEditable(table);
         removedSeatedGuest = true;
         return { ...seat, guestId: null };
       }
@@ -361,6 +397,8 @@ export function seatPartyAtTable(
   input: SeatPartyAtTableInput,
   partyGuestIds: string[],
 ): ChartState {
+  assertChartEditable(chart);
+
   const activeGuestIds = partyGuestIds.filter((guestId) => !chart.ignoredGuestIds.includes(guestId));
   if (activeGuestIds.length === 0) {
     throw new StateMutationError("Party has no active guests to seat");
@@ -383,6 +421,13 @@ export function seatPartyAtTable(
   if (!targetTable) {
     throw new StateMutationError("Table not found");
   }
+  assertTableEditable(targetTable);
+
+  tables.forEach((table) => {
+    if (table.id !== targetTable.id && table.locked && table.seats.some((seat) => seat.guestId && activeGuestIdSet.has(seat.guestId))) {
+      throw new StateMutationError("Cannot move a party member from a locked table");
+    }
+  });
 
   const openSeats = targetTable.seats.filter((seat) => seat.guestId === null);
   if (openSeats.length < activeGuestIds.length) {
@@ -402,6 +447,8 @@ export function seatPartyAtTable(
 }
 
 export function clearSeat(chart: ChartState, input: ClearSeatInput): ChartState {
+  assertChartEditable(chart);
+
   const tableIndex = chart.tables.findIndex((table) => table.id === input.tableId);
   if (tableIndex === -1) {
     throw new StateMutationError("Table not found");
@@ -412,6 +459,7 @@ export function clearSeat(chart: ChartState, input: ClearSeatInput): ChartState 
   if (!table) {
     throw new StateMutationError("Table not found");
   }
+  assertTableEditable(table);
 
   const seat = table.seats[input.seatIndex];
   if (!seat) {
@@ -424,6 +472,102 @@ export function clearSeat(chart: ChartState, input: ClearSeatInput): ChartState 
 
   table.seats[input.seatIndex] = { index: input.seatIndex, guestId: null };
   return touch({ ...chart, tables });
+}
+
+export function setChartLocked(chart: ChartState, input: SetChartLockedInput): ChartState {
+  if (chart.locked === input.locked) {
+    return chart;
+  }
+
+  return touch({ ...chart, locked: input.locked });
+}
+
+export function setTableLocked(chart: ChartState, input: SetTableLockedInput): ChartState {
+  const tableIndex = chart.tables.findIndex((table) => table.id === input.tableId);
+  if (tableIndex === -1) {
+    throw new StateMutationError("Table not found");
+  }
+
+  const tables = chart.tables.map(copyTable);
+  const table = tables[tableIndex];
+  if (!table) {
+    throw new StateMutationError("Table not found");
+  }
+
+  if (table.locked === input.locked) {
+    return chart;
+  }
+
+  table.locked = input.locked;
+  return touch({ ...chart, tables });
+}
+
+export function createFloorPlanObject(chart: ChartState, input: CreateFloorPlanObjectInput): ChartState {
+  assertChartEditable(chart);
+
+  const kind = parseFloorPlanObjectKind(input.kind);
+  const nextNumber = chart.floorPlanObjects.length + 1;
+  const object: FloorPlanObject = {
+    id: `floor-${randomUUID()}`,
+    kind,
+    label: normalizeFloorPlanObjectLabel(input.label, defaultFloorPlanObjectLabel(kind)),
+    x: 120 + ((nextNumber - 1) % 4) * 180,
+    y: 120 + Math.floor((nextNumber - 1) / 4) * 120,
+    width: defaultFloorPlanObjectSize(kind).width,
+    height: defaultFloorPlanObjectSize(kind).height,
+  };
+
+  return touch({ ...chart, floorPlanObjects: [...chart.floorPlanObjects, object] });
+}
+
+export function updateFloorPlanObject(chart: ChartState, input: UpdateFloorPlanObjectInput): ChartState {
+  assertChartEditable(chart);
+
+  const objectIndex = chart.floorPlanObjects.findIndex((object) => object.id === input.objectId);
+  if (objectIndex === -1) {
+    throw new StateMutationError("Floor plan object not found");
+  }
+
+  const floorPlanObjects = chart.floorPlanObjects.map((object) => ({ ...object }));
+  const object = floorPlanObjects[objectIndex];
+  if (!object) {
+    throw new StateMutationError("Floor plan object not found");
+  }
+
+  if (input.kind !== undefined) {
+    object.kind = parseFloorPlanObjectKind(input.kind);
+  }
+  if (input.label !== undefined) {
+    object.label = normalizeFloorPlanObjectLabel(input.label, object.label);
+  }
+  if (input.x !== undefined) {
+    object.x = parseCoordinate(input.x);
+  }
+  if (input.y !== undefined) {
+    object.y = parseCoordinate(input.y);
+  }
+  if (input.width !== undefined) {
+    object.width = parseFloorPlanObjectSize(input.width);
+  }
+  if (input.height !== undefined) {
+    object.height = parseFloorPlanObjectSize(input.height);
+  }
+
+  return touch({ ...chart, floorPlanObjects });
+}
+
+export function deleteFloorPlanObject(chart: ChartState, input: DeleteFloorPlanObjectInput): ChartState {
+  assertChartEditable(chart);
+
+  const exists = chart.floorPlanObjects.some((object) => object.id === input.objectId);
+  if (!exists) {
+    throw new StateMutationError("Floor plan object not found");
+  }
+
+  return touch({
+    ...chart,
+    floorPlanObjects: chart.floorPlanObjects.filter((object) => object.id !== input.objectId),
+  });
 }
 
 function touch(chart: ChartState): ChartState {
@@ -446,6 +590,18 @@ function copyTable(table: SeatingTable): SeatingTable {
     ...table,
     seats: table.seats.map((seat) => ({ ...seat })),
   };
+}
+
+function assertChartEditable(chart: ChartState): void {
+  if (chart.locked) {
+    throw new StateMutationError("Chart is locked. Unlock it before making changes.");
+  }
+}
+
+function assertTableEditable(table: SeatingTable): void {
+  if (table.locked) {
+    throw new StateMutationError(`${table.name} is locked. Unlock it before making changes.`);
+  }
 }
 
 function findGuestSeat(chart: ChartState, guestId: string): { tableId: string; seatIndex: number } | null {
@@ -487,6 +643,29 @@ function normalizeGuestMetadata(value: unknown, validGuestIds: Set<string>): Rec
   });
 
   return metadata;
+}
+
+function normalizeFloorPlanObjects(value: unknown): FloorPlanObject[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.flatMap((rawObject, index): FloorPlanObject[] => {
+    if (!isObject(rawObject) || !isFloorPlanObjectKind(rawObject.kind)) {
+      return [];
+    }
+
+    const size = defaultFloorPlanObjectSize(rawObject.kind);
+    return [{
+      id: typeof rawObject.id === "string" && rawObject.id ? rawObject.id : `floor-${index + 1}`,
+      kind: rawObject.kind,
+      label: normalizeFloorPlanObjectLabel(rawObject.label, defaultFloorPlanObjectLabel(rawObject.kind)),
+      x: finiteNumber(rawObject.x, 120 + index * 24),
+      y: finiteNumber(rawObject.y, 120 + index * 24),
+      width: clampFloorPlanObjectSize(rawObject.width, size.width),
+      height: clampFloorPlanObjectSize(rawObject.height, size.height),
+    }];
+  });
 }
 
 function emptyGuestMetadata(): GuestMetadata {
@@ -563,6 +742,98 @@ function parseShape(value: unknown): TableShape {
   }
 
   return value;
+}
+
+function parseFloorPlanObjectKind(value: unknown): FloorPlanObjectKind {
+  if (!isFloorPlanObjectKind(value)) {
+    throw new StateMutationError("Floor plan object type is invalid");
+  }
+
+  return value;
+}
+
+function isFloorPlanObjectKind(value: unknown): value is FloorPlanObjectKind {
+  return value === "dance-floor"
+    || value === "bar"
+    || value === "dj"
+    || value === "head-table"
+    || value === "door"
+    || value === "wall"
+    || value === "label"
+    || value === "blocked-area";
+}
+
+function defaultFloorPlanObjectLabel(kind: FloorPlanObjectKind): string {
+  switch (kind) {
+    case "dance-floor":
+      return "Dance Floor";
+    case "bar":
+      return "Bar";
+    case "dj":
+      return "DJ";
+    case "head-table":
+      return "Head Table";
+    case "door":
+      return "Door";
+    case "wall":
+      return "Wall";
+    case "label":
+      return "Label";
+    case "blocked-area":
+      return "Blocked Area";
+  }
+}
+
+function defaultFloorPlanObjectSize(kind: FloorPlanObjectKind): { width: number; height: number } {
+  switch (kind) {
+    case "dance-floor":
+      return { width: 220, height: 160 };
+    case "bar":
+      return { width: 160, height: 72 };
+    case "dj":
+      return { width: 120, height: 72 };
+    case "head-table":
+      return { width: 260, height: 86 };
+    case "door":
+      return { width: 80, height: 42 };
+    case "wall":
+      return { width: 260, height: 24 };
+    case "label":
+      return { width: 140, height: 48 };
+    case "blocked-area":
+      return { width: 160, height: 120 };
+  }
+}
+
+function normalizeFloorPlanObjectLabel(value: unknown, fallback: string): string {
+  if (typeof value !== "string") {
+    return fallback;
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return fallback;
+  }
+
+  return trimmed.slice(0, MAX_FLOOR_OBJECT_LABEL_LENGTH);
+}
+
+function parseFloorPlanObjectSize(value: unknown): number {
+  const size = Number(value);
+  if (!Number.isFinite(size)) {
+    throw new StateMutationError("Floor plan object size must be a finite number");
+  }
+
+  return Math.min(Math.max(Math.round(size), MIN_FLOOR_OBJECT_SIZE), MAX_FLOOR_OBJECT_SIZE);
+}
+
+function clampFloorPlanObjectSize(value: unknown, fallback: number): number {
+  const size = Number(value);
+  if (!Number.isFinite(size)) {
+    return fallback;
+  }
+
+  return Math.min(Math.max(Math.round(size), MIN_FLOOR_OBJECT_SIZE), MAX_FLOOR_OBJECT_SIZE);
 }
 
 function isTableShape(value: unknown): value is TableShape {

@@ -3,10 +3,15 @@ import { describe, expect, it } from "vitest";
 import {
   assignSeat,
   bulkUpdateGuests,
+  createFloorPlanObject,
   createEmptyChart,
   createTable,
+  deleteFloorPlanObject,
   seatPartyAtTable,
+  setChartLocked,
   setGuestIgnored,
+  setTableLocked,
+  updateFloorPlanObject,
   updateGuestMetadata,
   updateTable,
 } from "../server/state";
@@ -110,5 +115,37 @@ describe("seating chart state", () => {
     expect(table).toBeDefined();
 
     expect(() => seatPartyAtTable(chart, { partyId: "party-1", tableId: table!.id }, ["guest-1", "guest-2", "guest-3"])).toThrow(/not enough open seats/i);
+  });
+
+  it("blocks edits while the chart is locked", () => {
+    const chart = setChartLocked(createEmptyChart(), { locked: true });
+
+    expect(chart.locked).toBe(true);
+    expect(() => createTable(chart, { shape: "round", seatCount: 8 })).toThrow(/chart is locked/i);
+  });
+
+  it("blocks seat edits on locked tables", () => {
+    const validGuestIds = new Set(["guest-1"]);
+    let chart = createTable(createEmptyChart(), { shape: "round", seatCount: 4 });
+    const table = chart.tables[0];
+    expect(table).toBeDefined();
+
+    chart = setTableLocked(chart, { tableId: table!.id, locked: true });
+
+    expect(chart.tables[0]?.locked).toBe(true);
+    expect(() => assignSeat(chart, { tableId: table!.id, seatIndex: 0, guestId: "guest-1" }, validGuestIds)).toThrow(/locked/i);
+  });
+
+  it("creates, updates, and deletes floor plan objects", () => {
+    let chart = createFloorPlanObject(createEmptyChart(), { kind: "dance-floor", label: "Main dance floor" });
+    const object = chart.floorPlanObjects[0];
+    expect(object).toBeDefined();
+    expect(object?.label).toBe("Main dance floor");
+
+    chart = updateFloorPlanObject(chart, { objectId: object!.id, x: 300, y: 250, width: 240, height: 180 });
+    expect(chart.floorPlanObjects[0]).toMatchObject({ x: 300, y: 250, width: 240, height: 180 });
+
+    chart = deleteFloorPlanObject(chart, { objectId: object!.id });
+    expect(chart.floorPlanObjects).toHaveLength(0);
   });
 });

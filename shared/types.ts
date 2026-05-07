@@ -1,5 +1,7 @@
 export type TableShape = "round" | "rectangle";
 
+export type FloorPlanObjectKind = "dance-floor" | "bar" | "dj" | "head-table" | "door" | "wall" | "label" | "blocked-area";
+
 export type GuestKind = "primary" | "partner" | "child";
 
 export interface Guest {
@@ -30,7 +32,18 @@ export interface SeatingTable {
   seatCount: number;
   x: number;
   y: number;
+  locked: boolean;
   seats: SeatAssignment[];
+}
+
+export interface FloorPlanObject {
+  id: string;
+  kind: FloorPlanObjectKind;
+  label: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 }
 
 export interface GuestMetadata {
@@ -39,8 +52,10 @@ export interface GuestMetadata {
 }
 
 export interface ChartState {
-  version: 2;
+  version: 3;
+  locked: boolean;
   tables: SeatingTable[];
+  floorPlanObjects: FloorPlanObject[];
   ignoredGuestIds: string[];
   guestMetadata: Record<string, GuestMetadata>;
   updatedAt: string;
@@ -119,6 +134,34 @@ export interface RestoreHistoryInput {
   historyId: string;
 }
 
+export interface SetChartLockedInput {
+  locked: boolean;
+}
+
+export interface SetTableLockedInput {
+  tableId: string;
+  locked: boolean;
+}
+
+export interface CreateFloorPlanObjectInput {
+  kind: FloorPlanObjectKind;
+  label?: string;
+}
+
+export interface UpdateFloorPlanObjectInput {
+  objectId: string;
+  kind?: FloorPlanObjectKind;
+  label?: string;
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
+}
+
+export interface DeleteFloorPlanObjectInput {
+  objectId: string;
+}
+
 export type MutationAck =
   | { ok: true }
   | { ok: false; error: string };
@@ -138,4 +181,9 @@ export interface ClientToServerEvents {
   "guests:bulkUpdate": (input: BulkUpdateGuestsInput, ack: (result: MutationAck) => void) => void;
   "party:seatAtTable": (input: SeatPartyAtTableInput, ack: (result: MutationAck) => void) => void;
   "history:restore": (input: RestoreHistoryInput, ack: (result: MutationAck) => void) => void;
+  "chart:lock": (input: SetChartLockedInput, ack: (result: MutationAck) => void) => void;
+  "table:lock": (input: SetTableLockedInput, ack: (result: MutationAck) => void) => void;
+  "floor:create": (input: CreateFloorPlanObjectInput, ack: (result: MutationAck) => void) => void;
+  "floor:update": (input: UpdateFloorPlanObjectInput, ack: (result: MutationAck) => void) => void;
+  "floor:delete": (input: DeleteFloorPlanObjectInput, ack: (result: MutationAck) => void) => void;
 }
