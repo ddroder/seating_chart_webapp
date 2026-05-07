@@ -13,7 +13,7 @@ import type {
   MutationAck,
   ServerToClientEvents,
 } from "../shared/types";
-import { clearSeat, createTable, deleteTable, assignSeat, updateTable } from "./state";
+import { clearSeat, createTable, deleteTable, assignSeat, setGuestIgnored, updateTable } from "./state";
 import { loadChartState, saveChartState } from "./store";
 import { loadGuestData } from "./workbook";
 
@@ -81,6 +81,10 @@ io.on("connection", (socket) => {
 
   socket.on("seat:clear", (input, ack) => {
     void mutate(ack, (current) => clearSeat(current, input));
+  });
+
+  socket.on("guest:ignore", (input, ack) => {
+    void mutate(ack, (current) => setGuestIgnored(current, input, validGuestIds));
   });
 
   socket.on("disconnect", () => {

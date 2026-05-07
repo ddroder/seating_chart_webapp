@@ -239,7 +239,7 @@ button:disabled {
 
 .segmented-control {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 0.3rem;
   margin-bottom: 0.9rem;
   border-radius: 1rem;
@@ -332,6 +332,14 @@ button:disabled {
 
 .guest-row.selected {
   background: rgba(125, 63, 45, 0.11);
+}
+
+.guest-row.ignored {
+  background: rgba(125, 113, 101, 0.1);
+}
+
+.guest-row.ignored > button:first-child {
+  color: rgba(45, 36, 28, 0.62);
 }
 
 .guest-row > button:first-child {
@@ -660,5 +668,9 @@ button:disabled {
   .danger-button,
   .drag-handle {
     width: 100%;
+  }
+
+  .segmented-control {
+    grid-template-columns: repeat(2, 1fr);
   }
 }

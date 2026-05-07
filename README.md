@@ -10,6 +10,7 @@ There is intentionally no authentication. Anyone who can reach the app on the ne
 - Configurable seat counts from 1 to 32 seats per table.
 - Seat-count reductions are blocked when they would remove an occupied seat.
 - One guest can only be assigned to one seat at a time.
+- Guests can be marked ignored, which excludes vendors or other non-seated people from seating progress.
 - Connected browsers receive live updates through Socket.IO.
 - Tables can be dragged around the shared canvas.
 - Guest search supports name, party label, and relationship.

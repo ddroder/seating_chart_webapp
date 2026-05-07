@@ -8,6 +8,7 @@ import type {
   DeleteTableInput,
   SeatAssignment,
   SeatingTable,
+  SetGuestIgnoredInput,
   TableShape,
   UpdateTableInput,
 } from "../shared/types";
@@ -27,6 +28,7 @@ export function createEmptyChart(): ChartState {
   return {
     version: 1,
     tables: [],
+    ignoredGuestIds: [],
     updatedAt: new Date().toISOString(),
   };
 }
@@ -37,6 +39,7 @@ export function normalizeChartState(value: unknown, validGuestIds: Set<string>):
   }
 
   const usedGuestIds = new Set<string>();
+  const ignoredGuestIds = normalizeIgnoredGuestIds(value.ignoredGuestIds, validGuestIds);
   const tables: SeatingTable[] = [];
 
   value.tables.forEach((rawTable, tableIndex) => {
@@ -67,7 +70,7 @@ export function normalizeChartState(value: unknown, validGuestIds: Set<string>):
           return;
         }
 
-        if (!validGuestIds.has(guestId) || usedGuestIds.has(guestId)) {
+        if (!validGuestIds.has(guestId) || usedGuestIds.has(guestId) || ignoredGuestIds.has(guestId)) {
           return;
         }
 
@@ -82,6 +85,7 @@ export function normalizeChartState(value: unknown, validGuestIds: Set<string>):
   return {
     version: 1,
     tables,
+    ignoredGuestIds: [...ignoredGuestIds].sort(),
     updatedAt: typeof value.updatedAt === "string" ? value.updatedAt : new Date().toISOString(),
   };
 }
@@ -170,6 +174,10 @@ export function assignSeat(chart: ChartState, input: AssignSeatInput, validGuest
     throw new StateMutationError("Guest not found");
   }
 
+  if (chart.ignoredGuestIds.includes(input.guestId)) {
+    throw new StateMutationError("Guest is ignored and cannot be assigned to a seat");
+  }
+
   const tableIndex = chart.tables.findIndex((table) => table.id === input.tableId);
   if (tableIndex === -1) {
     throw new StateMutationError("Table not found");
@@ -201,6 +209,39 @@ export function assignSeat(chart: ChartState, input: AssignSeatInput, validGuest
 
   table.seats[input.seatIndex] = { index: input.seatIndex, guestId: input.guestId };
   return touch({ ...chart, tables });
+}
+
+export function setGuestIgnored(chart: ChartState, input: SetGuestIgnoredInput, validGuestIds: Set<string>): ChartState {
+  if (!validGuestIds.has(input.guestId)) {
+    throw new StateMutationError("Guest not found");
+  }
+
+  const ignoredGuestIds = new Set(chart.ignoredGuestIds);
+  if (input.ignored) {
+    ignoredGuestIds.add(input.guestId);
+  } else {
+    ignoredGuestIds.delete(input.guestId);
+  }
+
+  let removedSeatedGuest = false;
+  const tables = chart.tables.map((table) => ({
+    ...table,
+    seats: table.seats.map((seat) => {
+      if (input.ignored && seat.guestId === input.guestId) {
+        removedSeatedGuest = true;
+        return { ...seat, guestId: null };
+      }
+
+      return { ...seat };
+    }),
+  }));
+
+  const nextIgnoredGuestIds = [...ignoredGuestIds].sort();
+  if (arraysEqual(chart.ignoredGuestIds, nextIgnoredGuestIds) && !removedSeatedGuest) {
+    return chart;
+  }
+
+  return touch({ ...chart, tables, ignoredGuestIds: nextIgnoredGuestIds });
 }
 
 export function clearSeat(chart: ChartState, input: ClearSeatInput): ChartState {
@@ -260,6 +301,22 @@ function findGuestSeat(chart: ChartState, guestId: string): { tableId: string; s
   }
 
   return null;
+}
+
+function normalizeIgnoredGuestIds(value: unknown, validGuestIds: Set<string>): Set<string> {
+  if (!Array.isArray(value)) {
+    return new Set();
+  }
+
+  return new Set(value.filter((guestId): guestId is string => typeof guestId === "string" && validGuestIds.has(guestId)));
+}
+
+function arraysEqual(first: string[], second: string[]): boolean {
+  if (first.length !== second.length) {
+    return false;
+  }
+
+  return first.every((value, index) => value === second[index]);
 }
 
 function parseSeatCount(value: unknown): number {

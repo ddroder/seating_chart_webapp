@@ -18,7 +18,7 @@ import type {
 
 type SeatingSocket = Socket<ServerToClientEvents, ClientToServerEvents>;
 type ConnectionState = "connecting" | "connected" | "offline";
-type GuestFilter = "unseated" | "all" | "seated";
+type GuestFilter = "unseated" | "all" | "seated" | "ignored";
 
 interface GuestAssignment {
   tableId: string;
@@ -128,9 +128,12 @@ export default function App() {
   const guestsById = new Map(snapshot?.guests.map((guest) => [guest.id, guest]) ?? []);
   const assignments = buildAssignments(snapshot?.chart.tables ?? []);
   const seatedGuestIds = new Set(assignments.keys());
+  const ignoredGuestIds = new Set(snapshot?.chart.ignoredGuestIds ?? []);
   const selectedGuest = selectedGuestId ? guestsById.get(selectedGuestId) ?? null : null;
-  const seatedCount = seatedGuestIds.size;
-  const totalGuests = snapshot?.guests.length ?? 0;
+  const selectedGuestIgnored = selectedGuestId ? ignoredGuestIds.has(selectedGuestId) : false;
+  const seatedCount = [...seatedGuestIds].filter((guestId) => !ignoredGuestIds.has(guestId)).length;
+  const ignoredCount = ignoredGuestIds.size;
+  const totalGuests = (snapshot?.guests.length ?? 0) - ignoredCount;
 
   function handleAck(result: MutationAck) {
     if (result.ok) {
@@ -186,6 +189,15 @@ export default function App() {
     clearSeat({ tableId: assignment.tableId, seatIndex: assignment.seatIndex });
   }
 
+  function setGuestIgnored(guestId: string, ignored: boolean) {
+    if (!socket) {
+      setNotice("Not connected to the seating chart server");
+      return;
+    }
+
+    socket.emit("guest:ignore", { guestId, ignored }, handleAck);
+  }
+
   function assignSeat(tableId: string, seat: SeatAssignment) {
     if (!socket) {
       setNotice("Not connected to the seating chart server");
@@ -204,6 +216,11 @@ export default function App() {
 
     if (seatedGuestIds.has(selectedGuestId)) {
       setNotice("Selected guest is already seated. Unseat them before moving them.");
+      return;
+    }
+
+    if (ignoredGuestIds.has(selectedGuestId)) {
+      setNotice("Selected guest is ignored. Include them before assigning a seat.");
       return;
     }
 
@@ -248,6 +265,7 @@ export default function App() {
           <span className={`status-pill ${connectionState}`}>{connectionState}</span>
           <span>{snapshot.connectedUsers} connected</span>
           <span>{seatedCount} / {totalGuests} seated</span>
+          <span>{ignoredCount} ignored</span>
         </div>
       </header>
 
@@ -285,16 +303,27 @@ export default function App() {
             <button type="button" className={guestFilter === "unseated" ? "active" : ""} onClick={() => setGuestFilter("unseated")}>Unseated</button>
             <button type="button" className={guestFilter === "all" ? "active" : ""} onClick={() => setGuestFilter("all")}>All</button>
             <button type="button" className={guestFilter === "seated" ? "active" : ""} onClick={() => setGuestFilter("seated")}>Seated</button>
+            <button type="button" className={guestFilter === "ignored" ? "active" : ""} onClick={() => setGuestFilter("ignored")}>Ignored</button>
           </div>
 
           {selectedGuest ? (
             <div className="selected-card">
               <span>Selected</span>
               <strong>{selectedGuest.displayName}</strong>
-              {assignments.has(selectedGuest.id) ? (
-                <button type="button" onClick={() => clearGuest(selectedGuest.id)}>Unseat guest</button>
+              {selectedGuestIgnored ? (
+                <>
+                  <small>Ignored guests are excluded from seating progress and cannot be assigned.</small>
+                  <button type="button" onClick={() => setGuestIgnored(selectedGuest.id, false)}>Include guest</button>
+                </>
               ) : (
-                <small>Click any empty seat to assign.</small>
+                <>
+                  {assignments.has(selectedGuest.id) ? (
+                    <button type="button" onClick={() => clearGuest(selectedGuest.id)}>Unseat guest</button>
+                  ) : (
+                    <small>Click any empty seat to assign.</small>
+                  )}
+                  <button type="button" onClick={() => setGuestIgnored(selectedGuest.id, true)}>Ignore guest</button>
+                </>
               )}
             </div>
           ) : null}
@@ -304,11 +333,13 @@ export default function App() {
             guestsById={guestsById}
             assignments={assignments}
             seatedGuestIds={seatedGuestIds}
+            ignoredGuestIds={ignoredGuestIds}
             filter={guestFilter}
             search={deferredSearch}
             selectedGuestId={selectedGuestId}
             onSelectGuest={setSelectedGuestId}
             onClearGuest={clearGuest}
+            onSetGuestIgnored={setGuestIgnored}
           />
         </aside>
 
@@ -376,11 +407,13 @@ interface GuestListProps {
   guestsById: Map<string, Guest>;
   assignments: Map<string, GuestAssignment>;
   seatedGuestIds: Set<string>;
+  ignoredGuestIds: Set<string>;
   filter: GuestFilter;
   search: string;
   selectedGuestId: string | null;
   onSelectGuest: (guestId: string) => void;
   onClearGuest: (guestId: string) => void;
+  onSetGuestIgnored: (guestId: string, ignored: boolean) => void;
 }
 
 function GuestList(props: GuestListProps) {
@@ -392,17 +425,23 @@ function GuestList(props: GuestListProps) {
         .filter(isGuest)
         .filter((guest) => {
           const isSeated = props.seatedGuestIds.has(guest.id);
-          if (props.filter === "unseated" && isSeated) {
+          const isIgnored = props.ignoredGuestIds.has(guest.id);
+          if (props.filter === "unseated" && (isSeated || isIgnored)) {
             return false;
           }
-          if (props.filter === "seated" && !isSeated) {
+          if (props.filter === "seated" && (!isSeated || isIgnored)) {
+            return false;
+          }
+          if (props.filter === "ignored" && !isIgnored) {
             return false;
           }
           if (!query) {
             return true;
           }
 
-          return `${guest.displayName} ${guest.fullName} ${party.label} ${party.relationship}`.toLowerCase().includes(query);
+          return `${guest.displayName} ${guest.fullName} ${party.label} ${party.relationship} ${isIgnored ? "ignored" : ""}`
+            .toLowerCase()
+            .includes(query);
         });
 
       return { party, guests };
@@ -425,17 +464,26 @@ function GuestList(props: GuestListProps) {
             {guests.map((guest) => {
               const assignment = props.assignments.get(guest.id);
               const isSelected = props.selectedGuestId === guest.id;
+              const isIgnored = props.ignoredGuestIds.has(guest.id);
               return (
-                <div key={guest.id} className={`guest-row ${isSelected ? "selected" : ""}`}>
+                <div key={guest.id} className={`guest-row ${isSelected ? "selected" : ""} ${isIgnored ? "ignored" : ""}`}>
                   <button type="button" onClick={() => props.onSelectGuest(guest.id)}>
                     <span>{guest.displayName}</span>
-                    <small>{guest.kind}{assignment ? ` - ${assignment.tableName}, seat ${assignment.seatIndex + 1}` : " - unseated"}</small>
+                    <small>{guest.kind}{guestStatusText(isIgnored, assignment)}</small>
                   </button>
-                  {assignment ? (
+                  {isIgnored ? (
+                    <button type="button" className="mini-button" onClick={() => props.onSetGuestIgnored(guest.id, false)}>
+                      Include
+                    </button>
+                  ) : assignment ? (
                     <button type="button" className="mini-button" onClick={() => props.onClearGuest(guest.id)}>
                       Unseat
                     </button>
-                  ) : null}
+                  ) : (
+                    <button type="button" className="mini-button" onClick={() => props.onSetGuestIgnored(guest.id, true)}>
+                      Ignore
+                    </button>
+                  )}
                 </div>
               );
             })}
@@ -444,6 +492,18 @@ function GuestList(props: GuestListProps) {
       ))}
     </div>
   );
+}
+
+function guestStatusText(isIgnored: boolean, assignment: GuestAssignment | undefined): string {
+  if (isIgnored) {
+    return " - ignored";
+  }
+
+  if (assignment) {
+    return ` - ${assignment.tableName}, seat ${assignment.seatIndex + 1}`;
+  }
+
+  return " - unseated";
 }
 
 interface TableCardProps {

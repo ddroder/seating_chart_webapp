@@ -36,6 +36,7 @@ export interface SeatingTable {
 export interface ChartState {
   version: 1;
   tables: SeatingTable[];
+  ignoredGuestIds: string[];
   updatedAt: string;
 }
 
@@ -75,6 +76,11 @@ export interface ClearSeatInput {
   seatIndex: number;
 }
 
+export interface SetGuestIgnoredInput {
+  guestId: string;
+  ignored: boolean;
+}
+
 export type MutationAck =
   | { ok: true }
   | { ok: false; error: string };
@@ -89,4 +95,5 @@ export interface ClientToServerEvents {
   "table:delete": (input: DeleteTableInput, ack: (result: MutationAck) => void) => void;
   "seat:assign": (input: AssignSeatInput, ack: (result: MutationAck) => void) => void;
   "seat:clear": (input: ClearSeatInput, ack: (result: MutationAck) => void) => void;
+  "guest:ignore": (input: SetGuestIgnoredInput, ack: (result: MutationAck) => void) => void;
 }
