@@ -819,6 +819,15 @@ button:disabled {
   box-shadow: 0 6px 16px rgba(58, 42, 28, 0.12);
 }
 
+.drag-handle.compact {
+  position: absolute;
+  left: 0.45rem;
+  top: 0.45rem;
+  z-index: 4;
+  background: rgba(255, 250, 242, 0.9);
+  box-shadow: 0 6px 16px rgba(58, 42, 28, 0.12);
+}
+
 .floor-object {
   position: absolute;
   z-index: 1;

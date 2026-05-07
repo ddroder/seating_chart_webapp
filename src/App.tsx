@@ -1255,14 +1255,25 @@ function TableCard(props: TableCardProps) {
       style={{ left: props.position.x, top: props.position.y }}
     >
       {props.collapsed ? (
-        <button
-          type="button"
-          className="table-edit-toggle compact"
-          onClick={() => props.onToggleCollapsed(props.table.id)}
-          aria-label={`Expand editing controls for ${props.table.name}`}
-        >
-          Edit
-        </button>
+        <>
+          <button
+            type="button"
+            className="drag-handle compact"
+            disabled={props.chartLocked || props.table.locked}
+            onPointerDown={(event) => props.onStartDrag(props.table, event)}
+            aria-label={`Move ${props.table.name}`}
+          >
+            Move
+          </button>
+          <button
+            type="button"
+            className="table-edit-toggle compact"
+            onClick={() => props.onToggleCollapsed(props.table.id)}
+            aria-label={`Expand editing controls for ${props.table.name}`}
+          >
+            Edit
+          </button>
+        </>
       ) : (
         <>
           <div className="table-card-header">
