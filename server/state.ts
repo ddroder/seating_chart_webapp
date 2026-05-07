@@ -33,6 +33,7 @@ const MAX_NOTE_LENGTH = 500;
 const MAX_FLOOR_OBJECT_LABEL_LENGTH = 48;
 const MIN_FLOOR_OBJECT_SIZE = 24;
 const MAX_FLOOR_OBJECT_SIZE = 800;
+const MAX_COORDINATE = 10000;
 
 export class StateMutationError extends Error {
   constructor(message: string) {
@@ -859,7 +860,7 @@ function parseCoordinate(value: unknown): number {
     throw new StateMutationError("Table position must be a finite number");
   }
 
-  return Math.min(Math.max(Math.round(coordinate), 0), 5000);
+  return Math.min(Math.max(Math.round(coordinate), 0), MAX_COORDINATE);
 }
 
 function finiteNumber(value: unknown, fallback: number): number {

@@ -47,6 +47,13 @@ interface DragState {
   startY: number;
 }
 
+interface PanState {
+  startPointerX: number;
+  startPointerY: number;
+  startScrollLeft: number;
+  startScrollTop: number;
+}
+
 interface PrintOptions {
   includeIgnored: boolean;
   includeUnseated: boolean;
@@ -56,6 +63,10 @@ interface PrintOptions {
 const ROUND_STAGE_SIZE = 320;
 const RECT_STAGE_WIDTH = 380;
 const RECT_STAGE_HEIGHT = 280;
+const CANVAS_WIDTH = 5600;
+const CANVAS_HEIGHT = 3600;
+const MIN_CANVAS_ZOOM = 0.45;
+const MAX_CANVAS_ZOOM = 1.6;
 const TAG_PRESETS = ["vendor", "family", "wedding party", "do not seat near", "needs aisle", "child", "high priority"];
 const EMPTY_METADATA: GuestMetadata = { tags: [], note: "" };
 const FLOOR_OBJECT_KINDS: FloorPlanObjectKind[] = ["dance-floor", "bar", "dj", "head-table", "door", "wall", "label", "blocked-area"];
@@ -84,9 +95,13 @@ export default function App() {
     includeUnseated: true,
     compact: false,
   });
+  const [canvasZoom, setCanvasZoom] = useState(0.85);
   const [dragState, setDragState] = useState<DragState | null>(null);
+  const [panState, setPanState] = useState<PanState | null>(null);
+  const [collapsedTableIds, setCollapsedTableIds] = useState<Set<string>>(new Set());
   const [localPositions, setLocalPositions] = useState<Record<string, { x: number; y: number }>>({});
   const localPositionsRef = useRef(localPositions);
+  const canvasViewportRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     localPositionsRef.current = localPositions;
@@ -133,10 +148,11 @@ export default function App() {
 
     const activeDrag = dragState;
     const activeSocket = socket;
+    const activeZoom = canvasZoom;
 
     function handlePointerMove(event: globalThis.PointerEvent) {
-      const x = Math.max(0, activeDrag.startX + event.clientX - activeDrag.startPointerX);
-      const y = Math.max(0, activeDrag.startY + event.clientY - activeDrag.startPointerY);
+      const x = Math.max(0, activeDrag.startX + (event.clientX - activeDrag.startPointerX) / activeZoom);
+      const y = Math.max(0, activeDrag.startY + (event.clientY - activeDrag.startPointerY) / activeZoom);
       setLocalPositions((current) => ({ ...current, [activeDrag.id]: { x, y } }));
     }
 
@@ -162,7 +178,37 @@ export default function App() {
       window.removeEventListener("pointermove", handlePointerMove);
       window.removeEventListener("pointerup", handlePointerUp);
     };
-  }, [dragState, socket]);
+  }, [canvasZoom, dragState, socket]);
+
+  useEffect(() => {
+    if (!panState) {
+      return;
+    }
+
+    const activePan = panState;
+
+    function handlePointerMove(event: globalThis.PointerEvent) {
+      const viewport = canvasViewportRef.current;
+      if (!viewport) {
+        return;
+      }
+
+      viewport.scrollLeft = activePan.startScrollLeft - (event.clientX - activePan.startPointerX);
+      viewport.scrollTop = activePan.startScrollTop - (event.clientY - activePan.startPointerY);
+    }
+
+    function handlePointerUp() {
+      setPanState(null);
+    }
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp, { once: true });
+
+    return () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+    };
+  }, [panState]);
 
   useEffect(() => {
     if (!snapshot) {
@@ -463,6 +509,78 @@ export default function App() {
     downloadCsv("seating-chart-assignments.csv", buildCsvExport(snapshot, guestsById, partiesById, ignoredGuestIds, metadataByGuestId));
   }
 
+  function startCanvasPan(event: PointerEvent<HTMLDivElement>) {
+    if (event.button !== 0 || event.target !== event.currentTarget) {
+      return;
+    }
+    const viewport = canvasViewportRef.current;
+    if (!viewport) {
+      return;
+    }
+
+    event.preventDefault();
+    setPanState({
+      startPointerX: event.clientX,
+      startPointerY: event.clientY,
+      startScrollLeft: viewport.scrollLeft,
+      startScrollTop: viewport.scrollTop,
+    });
+  }
+
+  function setClampedCanvasZoom(nextZoom: number) {
+    setCanvasZoom(Math.min(Math.max(nextZoom, MIN_CANVAS_ZOOM), MAX_CANVAS_ZOOM));
+  }
+
+  function resetCanvasView() {
+    setCanvasZoom(0.85);
+    requestAnimationFrame(() => {
+      const viewport = canvasViewportRef.current;
+      if (!viewport) {
+        return;
+      }
+
+      viewport.scrollLeft = 0;
+      viewport.scrollTop = 0;
+    });
+  }
+
+  function toggleTableCollapsed(tableId: string) {
+    setCollapsedTableIds((current) => {
+      const next = new Set(current);
+      if (next.has(tableId)) {
+        next.delete(tableId);
+      } else {
+        next.add(tableId);
+      }
+      return next;
+    });
+  }
+
+  function centerUsedCanvasArea() {
+    if (!snapshot) {
+      return;
+    }
+
+    const viewport = canvasViewportRef.current;
+    if (!viewport) {
+      return;
+    }
+
+    const positions = [
+      ...snapshot.chart.tables.map((table) => ({ x: table.x, y: table.y })),
+      ...snapshot.chart.floorPlanObjects.map((object) => ({ x: object.x, y: object.y })),
+    ];
+    if (positions.length === 0) {
+      resetCanvasView();
+      return;
+    }
+
+    const minX = Math.max(0, Math.min(...positions.map((position) => position.x)) - 160);
+    const minY = Math.max(0, Math.min(...positions.map((position) => position.y)) - 160);
+    viewport.scrollLeft = minX * canvasZoom;
+    viewport.scrollTop = minY * canvasZoom;
+  }
+
   if (!snapshot) {
     return (
       <main className="loading-screen">
@@ -646,6 +764,7 @@ export default function App() {
             <div>
               <p className="eyebrow">Tables</p>
               <h2>{snapshot.chart.tables.length} tables</h2>
+              <small className="canvas-hint">Drag empty grid space to pan. Use table handles to move objects.</small>
             </div>
             <div className="new-table-controls">
               <label>
@@ -690,46 +809,68 @@ export default function App() {
             </div>
           </div>
 
-          <div className="canvas">
-            {snapshot.chart.tables.length === 0 ? (
-              <div className="empty-canvas">
-                <p className="eyebrow">Start here</p>
-                <h2>Add a round or rectangle table.</h2>
-                <p>Select guests from the left, then click empty seats to place them.</p>
+          <div className="canvas-controls" aria-label="canvas controls">
+            <button type="button" onClick={() => setClampedCanvasZoom(canvasZoom - 0.1)}>Zoom out</button>
+            <span>{Math.round(canvasZoom * 100)}%</span>
+            <button type="button" onClick={() => setClampedCanvasZoom(canvasZoom + 0.1)}>Zoom in</button>
+            <button type="button" onClick={centerUsedCanvasArea}>Center used area</button>
+            <button type="button" onClick={resetCanvasView}>Reset view</button>
+            <span>{CANVAS_WIDTH.toLocaleString()} x {CANVAS_HEIGHT.toLocaleString()} workspace</span>
+          </div>
+
+          <div ref={canvasViewportRef} className={`canvas-viewport ${panState ? "panning" : ""}`}>
+            <div
+              className="canvas-zoom-frame"
+              style={{ width: CANVAS_WIDTH * canvasZoom, height: CANVAS_HEIGHT * canvasZoom }}
+            >
+              <div
+                className="canvas"
+                style={{ width: CANVAS_WIDTH, height: CANVAS_HEIGHT, transform: `scale(${canvasZoom})` }}
+                onPointerDown={startCanvasPan}
+              >
+                {snapshot.chart.tables.length === 0 ? (
+                  <div className="empty-canvas">
+                    <p className="eyebrow">Start here</p>
+                    <h2>Add a round or rectangle table.</h2>
+                    <p>Select guests from the left, then click empty seats to place them. Drag empty grid space to pan around the larger workspace.</p>
+                  </div>
+                ) : null}
+
+                {snapshot.chart.floorPlanObjects.map((object) => (
+                  <FloorObjectCard
+                    key={object.id}
+                    object={object}
+                    position={localPositions[object.id] ?? { x: object.x, y: object.y }}
+                    chartLocked={snapshot.chart.locked}
+                    onStartDrag={startFloorObjectDrag}
+                    onUpdate={updateFloorPlanObject}
+                    onDelete={deleteFloorPlanObject}
+                  />
+                ))}
+
+                {snapshot.chart.tables.map((table) => (
+                  <TableCard
+                    key={table.id}
+                    table={table}
+                    position={localPositions[table.id] ?? { x: table.x, y: table.y }}
+                    guestsById={guestsById}
+                    selectedGuestId={selectedGuestId}
+                    selectedTableId={selectedTableId}
+                    chartLocked={snapshot.chart.locked}
+                    collapsed={collapsedTableIds.has(table.id)}
+                    onSelectTable={setSelectedTableId}
+                    onToggleCollapsed={toggleTableCollapsed}
+                    onStartDrag={startTableDrag}
+                    onUpdateTable={updateTable}
+                    onDeleteTable={deleteTable}
+                    onSetTableLocked={setTableLocked}
+                    onSeatClick={assignSeat}
+                    onClearSeat={clearSeat}
+                    onLocalError={setNotice}
+                  />
+                ))}
               </div>
-            ) : null}
-
-            {snapshot.chart.floorPlanObjects.map((object) => (
-              <FloorObjectCard
-                key={object.id}
-                object={object}
-                position={localPositions[object.id] ?? { x: object.x, y: object.y }}
-                chartLocked={snapshot.chart.locked}
-                onStartDrag={startFloorObjectDrag}
-                onUpdate={updateFloorPlanObject}
-                onDelete={deleteFloorPlanObject}
-              />
-            ))}
-
-            {snapshot.chart.tables.map((table) => (
-              <TableCard
-                key={table.id}
-                table={table}
-                position={localPositions[table.id] ?? { x: table.x, y: table.y }}
-                guestsById={guestsById}
-                selectedGuestId={selectedGuestId}
-                selectedTableId={selectedTableId}
-                chartLocked={snapshot.chart.locked}
-                onSelectTable={setSelectedTableId}
-                onStartDrag={startTableDrag}
-                onUpdateTable={updateTable}
-                onDeleteTable={deleteTable}
-                onSetTableLocked={setTableLocked}
-                onSeatClick={assignSeat}
-                onClearSeat={clearSeat}
-                onLocalError={setNotice}
-              />
-            ))}
+            </div>
           </div>
         </section>
       </section>
@@ -1051,7 +1192,9 @@ interface TableCardProps {
   selectedGuestId: string | null;
   selectedTableId: string | null;
   chartLocked: boolean;
+  collapsed: boolean;
   onSelectTable: (tableId: string) => void;
+  onToggleCollapsed: (tableId: string) => void;
   onStartDrag: (table: SeatingTable, event: PointerEvent<HTMLButtonElement>) => void;
   onUpdateTable: (input: UpdateTableInput) => void;
   onDeleteTable: (tableId: string) => void;
@@ -1108,74 +1251,90 @@ function TableCard(props: TableCardProps) {
 
   return (
     <article
-      className={`table-card ${props.table.shape} ${props.selectedTableId === props.table.id ? "selected-table" : ""} ${props.table.locked ? "locked" : ""}`}
+      className={`table-card ${props.table.shape} ${props.selectedTableId === props.table.id ? "selected-table" : ""} ${props.table.locked ? "locked" : ""} ${props.collapsed ? "collapsed" : ""}`}
       style={{ left: props.position.x, top: props.position.y }}
     >
-      <div className="table-card-header">
-        <button type="button" className="drag-handle" disabled={props.chartLocked || props.table.locked} onPointerDown={(event) => props.onStartDrag(props.table, event)}>
-          Drag
-        </button>
-        <input
-          className="table-name-input"
-          value={draftName}
-          disabled={props.chartLocked || props.table.locked}
-          onChange={(event) => setDraftName(event.target.value)}
-          onBlur={commitName}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") {
-              event.currentTarget.blur();
-            }
-          }}
-          aria-label="table name"
-        />
+      {props.collapsed ? (
         <button
           type="button"
-          className="danger-button"
-          disabled={props.chartLocked || props.table.locked || occupiedCount > 0}
-          title={occupiedCount > 0 ? "Unseat guests before deleting this table" : "Delete table"}
-          onClick={() => props.onDeleteTable(props.table.id)}
+          className="table-edit-toggle compact"
+          onClick={() => props.onToggleCollapsed(props.table.id)}
+          aria-label={`Expand editing controls for ${props.table.name}`}
         >
-          Delete
+          Edit
         </button>
-      </div>
+      ) : (
+        <>
+          <div className="table-card-header">
+            <button type="button" className="drag-handle" disabled={props.chartLocked || props.table.locked} onPointerDown={(event) => props.onStartDrag(props.table, event)}>
+              Drag
+            </button>
+            <input
+              className="table-name-input"
+              value={draftName}
+              disabled={props.chartLocked || props.table.locked}
+              onChange={(event) => setDraftName(event.target.value)}
+              onBlur={commitName}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.currentTarget.blur();
+                }
+              }}
+              aria-label="table name"
+            />
+            <button
+              type="button"
+              className="danger-button"
+              disabled={props.chartLocked || props.table.locked || occupiedCount > 0}
+              title={occupiedCount > 0 ? "Unseat guests before deleting this table" : "Delete table"}
+              onClick={() => props.onDeleteTable(props.table.id)}
+            >
+              Delete
+            </button>
+            <button type="button" className="table-edit-toggle" onClick={() => props.onToggleCollapsed(props.table.id)}>
+              Collapse
+            </button>
+          </div>
 
-      <div className="table-settings">
-        <label>
-          Shape
-          <select
-            value={props.table.shape}
-            disabled={props.chartLocked || props.table.locked}
-            onChange={(event) => props.onUpdateTable({ tableId: props.table.id, shape: event.target.value as TableShape })}
-          >
-            <option value="round">Round</option>
-            <option value="rectangle">Rectangle</option>
-          </select>
-        </label>
-        <label>
-          Seats
-          <input
-            type="number"
-            min={minimumSeatCount}
-            max={32}
-            value={draftSeatCount}
-            disabled={props.chartLocked || props.table.locked}
-            onChange={(event) => setDraftSeatCount(event.target.value)}
-            onBlur={commitSeatCount}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") {
-                event.currentTarget.blur();
-              }
-            }}
-          />
-        </label>
-        <span>{occupiedCount} occupied</span>
-        <button type="button" className="ghost-button" onClick={() => props.onSelectTable(props.table.id)}>
-          Use for parties
-        </button>
-        <button type="button" className="ghost-button" disabled={props.chartLocked} onClick={() => props.onSetTableLocked({ tableId: props.table.id, locked: !props.table.locked })}>
-          {props.table.locked ? "Unlock table" : "Lock table"}
-        </button>
-      </div>
+          <div className="table-settings">
+            <label>
+              Shape
+              <select
+                value={props.table.shape}
+                disabled={props.chartLocked || props.table.locked}
+                onChange={(event) => props.onUpdateTable({ tableId: props.table.id, shape: event.target.value as TableShape })}
+              >
+                <option value="round">Round</option>
+                <option value="rectangle">Rectangle</option>
+              </select>
+            </label>
+            <label>
+              Seats
+              <input
+                type="number"
+                min={minimumSeatCount}
+                max={32}
+                value={draftSeatCount}
+                disabled={props.chartLocked || props.table.locked}
+                onChange={(event) => setDraftSeatCount(event.target.value)}
+                onBlur={commitSeatCount}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.currentTarget.blur();
+                  }
+                }}
+              />
+            </label>
+            <span>{occupiedCount} occupied</span>
+            <button type="button" className="ghost-button" onClick={() => props.onSelectTable(props.table.id)}>
+              Use for parties
+            </button>
+            <button type="button" className="ghost-button" disabled={props.chartLocked} onClick={() => props.onSetTableLocked({ tableId: props.table.id, locked: !props.table.locked })}>
+              {props.table.locked ? "Unlock table" : "Lock table"}
+            </button>
+          </div>
+        </>
+      )}
 
       <div className={`table-stage ${props.table.shape}`}>
         <div className={`table-surface ${props.table.shape}`}>

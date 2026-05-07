@@ -149,6 +149,7 @@ button:disabled {
 .notice button,
 .ghost-button,
 .mini-button,
+.table-edit-toggle,
 .bulk-action-bar button,
 .metadata-row button,
 .tag-presets button,
@@ -610,7 +611,7 @@ button:disabled {
 
 .chart-panel {
   min-width: 0;
-  overflow: auto;
+  overflow: hidden;
   padding: 1rem;
 }
 
@@ -619,6 +620,44 @@ button:disabled {
   left: 0;
   z-index: 4;
   margin-bottom: 1rem;
+}
+
+.canvas-hint {
+  display: block;
+  margin-top: 0.25rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.canvas-controls {
+  position: sticky;
+  left: 0;
+  z-index: 4;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem;
+  margin-bottom: 0.75rem;
+  border: 1px solid rgba(125, 113, 101, 0.18);
+  border-radius: 1rem;
+  background: rgba(255, 250, 242, 0.78);
+  padding: 0.5rem;
+}
+
+.canvas-controls button,
+.canvas-controls span {
+  border: 1px solid rgba(125, 113, 101, 0.22);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--ink);
+  padding: 0.45rem 0.65rem;
+  font-size: 0.8rem;
+  font-weight: 850;
+}
+
+.canvas-controls span {
+  color: var(--muted);
 }
 
 .new-table-controls {
@@ -662,17 +701,38 @@ button:disabled {
   touch-action: none;
 }
 
+.canvas-viewport {
+  width: 100%;
+  height: clamp(38rem, calc(100vh - 12rem), 72rem);
+  overflow: auto;
+  border: 1px solid rgba(125, 113, 101, 0.18);
+  border-radius: 1.2rem;
+  background: rgba(255, 250, 242, 0.35);
+  cursor: grab;
+  overscroll-behavior: contain;
+}
+
+.canvas-viewport.panning {
+  cursor: grabbing;
+  user-select: none;
+}
+
+.canvas-zoom-frame {
+  position: relative;
+}
+
 .canvas {
   position: relative;
-  min-width: 1220px;
-  min-height: 920px;
-  border: 1px solid rgba(125, 113, 101, 0.18);
+  transform-origin: top left;
   border-radius: 1.2rem;
   background:
     linear-gradient(rgba(67, 48, 31, 0.055) 1px, transparent 1px),
     linear-gradient(90deg, rgba(67, 48, 31, 0.055) 1px, transparent 1px),
+    linear-gradient(rgba(67, 48, 31, 0.035) 2px, transparent 2px),
+    linear-gradient(90deg, rgba(67, 48, 31, 0.035) 2px, transparent 2px),
     rgba(255, 250, 242, 0.62);
-  background-size: 28px 28px;
+  background-size: 28px 28px, 28px 28px, 280px 280px, 280px 280px;
+  touch-action: none;
 }
 
 .empty-canvas {
@@ -693,6 +753,7 @@ button:disabled {
 .table-card {
   position: absolute;
   z-index: 2;
+  cursor: default;
   border: 1px solid rgba(93, 69, 48, 0.18);
   border-radius: 1.25rem;
   background: rgba(255, 252, 246, 0.95);
@@ -722,9 +783,46 @@ button:disabled {
   text-transform: uppercase;
 }
 
+.table-card.collapsed {
+  padding: 0.45rem;
+}
+
+.table-card.collapsed.round {
+  width: 336px;
+}
+
+.table-card.collapsed.rectangle {
+  width: 396px;
+}
+
+.table-card.collapsed .table-stage.round {
+  width: 320px;
+  height: 320px;
+}
+
+.table-card.collapsed .table-stage.rectangle {
+  width: 380px;
+  height: 280px;
+}
+
+.table-edit-toggle {
+  flex: 0 0 auto;
+  padding: 0.52rem 0.75rem;
+}
+
+.table-edit-toggle.compact {
+  position: absolute;
+  right: 0.45rem;
+  top: 0.45rem;
+  z-index: 4;
+  background: rgba(255, 250, 242, 0.9);
+  box-shadow: 0 6px 16px rgba(58, 42, 28, 0.12);
+}
+
 .floor-object {
   position: absolute;
   z-index: 1;
+  cursor: default;
   display: grid;
   align-content: start;
   gap: 0.35rem;
